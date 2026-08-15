@@ -18,8 +18,8 @@ hypothesis: >
   说明增益来自 on-policy 自蒸馏本身而不是视角特权。
 
 code:
-  git_commit: null  # 启动训练前填入实际 commit
-  git_dirty: null
+  git_commit: "4482ab7"
+  git_dirty: false
   key_files:
     - scripts/opsd/mvopsd/            # geometry / markers / views / sources 工具库
     - scripts/opsd/build_mvopsd_plan.py        # stage 1：采样 + 过滤 + K 预算 + prompt 改写
