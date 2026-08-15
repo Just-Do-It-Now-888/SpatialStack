@@ -1,0 +1,141 @@
+experiment_id: 20260813_qwen35_geo_baseline
+title: Qwen3.5-4B 与 VGGT 几何融合基线
+status: running  # 训练完成，评测待运行
+
+created_at: null  # 历史实验，准确开始时间未记录
+finished_at: null
+owner: ""
+
+goal: 建立 SpatialStack Qwen3.5-4B 几何融合训练及评测基线。
+hypothesis: 使用 VGGT 多层几何特征并注入语言层可改善空间推理能力。
+
+code:
+  git_commit: null  # 当前项目目录没有 .git 元数据
+  git_dirty: null
+
+environment:
+  conda_env: sr_opsd
+  nodes: null
+  gpus_per_node: null
+  gpu_type: null
+
+model:
+  backbone: Qwen3.5-4B
+  model_path: models/Qwen3.5-4B
+  geometry_encoder: VGGT-1B
+  geometry_encoder_path: models/VGGT-1B
+
+data:
+  training_datasets:
+    - spar_234k%60
+    - llava_hound_64k%60
+    - vlm3r_scannet%60
+    - vsi_appr_order%50
+  dataset_version: unrecorded
+
+training:
+  status: completed
+  entrypoint: scripts/train_eval.sh
+  command: bash scripts/train_eval.sh
+  parameters:
+    seed: 0
+    learning_rate: 1.0e-5
+    total_batch_size: 64
+    per_device_train_batch_size: 1
+    epochs: 1
+    max_length: 12800
+    feature_fusion_method: deepstack_language_add
+    geometry_encoder_layers: [11, 17, 23]
+    geometry_fusion_layers: [0, 1, 2]
+    use_geometry_encoder: true
+    data_flatten: false
+  artifacts:
+    output_dir: output/spatialstack_qwen35_train
+    checkpoint: output/spatialstack_qwen35_train
+    intermediate_checkpoints:
+      - output/spatialstack_qwen35_train/checkpoint-1000
+      - output/spatialstack_qwen35_train/checkpoint-2000
+      - output/spatialstack_qwen35_train/checkpoint-3000
+    trainer_state: output/spatialstack_qwen35_train/trainer_state.json
+    train_log: output/spatialstack_qwen35_train/train.rank0.log
+  results:
+    metrics:
+      global_step: 3308
+      epoch: 0.9996222709
+      train_loss: 0.5245385607
+      train_runtime_seconds: 34637.7962
+      train_samples_per_second: 6.114
+      train_steps_per_second: 0.096
+    summary: 训练已完成并生成最终模型及三个中间 checkpoint。
+    failure_reason: ""
+
+evaluation:
+  status: planned
+  entrypoint: scripts/eval_only.sh
+  command: bash scripts/eval_only.sh
+  benchmarks:
+    - vsibench
+    - cvbench
+    - blink_spatial
+    - sparbench
+  parameters:
+    max_num_frames: 32
+    max_length: 12800
+    use_flash_attention_2: true
+    disable_thinking: true
+  artifacts:
+    checkpoint: output/spatialstack_qwen35_train
+    eval_root: logs/eval/spatialstack_qwen35_4b
+  results:
+    metrics: {}
+    summary: 尚未在评估目录中发现 *_results.json。
+    failure_reason: ""
+
+handoff:
+  current_phase: evaluation
+  last_updated: "2026-08-13T11:24:00+08:00"
+  current_task: 运行 VSI-Bench、CV-Bench、BLINK Spatial 和 SPAR-Bench 评测。
+  owner: ""
+  active_job_id: null
+  resources: 未分配
+  blocker: ""
+  next_action: 启动前确认 checkpoint 目录包含 config.json，并登记 GPU 与作业 ID。
+
+issues:
+  - id: ISSUE-001
+    status: open
+    phase: shared
+    discovered_at: "2026-08-13T11:10:00+08:00"
+    symptom: 无法记录本次实验对应的 Git commit。
+    evidence: 项目根目录执行 git status 返回 not a git repository。
+    root_cause: 当前项目目录没有 .git 元数据。
+    solution: 暂时在 activity_log 中记录实验管理相关改动；恢复 Git 后补充版本信息。
+    prevention: 后续实验开始前记录 git_commit 和 git_dirty。
+  - id: ISSUE-002
+    status: mitigated
+    phase: shared
+    discovered_at: "2026-08-13T11:12:00+08:00"
+    symptom: 实验 ID 与训练、评测产物目录名称不一致。
+    evidence: 产物位于 output/spatialstack_qwen35_train 和 logs/eval/spatialstack_qwen35_4b。
+    root_cause: 历史脚本在建立统一实验命名规范之前已使用固定目录。
+    solution: 在本文件中保留实际 artifacts 路径，不移动已有 checkpoint。
+    prevention: 新实验所有输出目录统一使用 experiment_id。
+
+activity_log:
+  - at: "2026-08-13T11:12:00+08:00"
+    actor: Cursor
+    action: 从 trainer_state.json 整理历史训练配置和结果。
+    result: 确认训练完成于 step 3308，train loss 为 0.5245385607。
+  - at: "2026-08-13T11:19:00+08:00"
+    actor: Cursor
+    action: 将训练与评测记录合并为同一个实验文件。
+    result: 建立 training 与 evaluation 两阶段结构。
+  - at: "2026-08-13T11:24:00+08:00"
+    actor: Cursor
+    action: 增加跨窗口交接、问题记录和活动日志。
+    result: 当前任务明确为评测待运行，尚无活跃作业。
+
+notes:
+  conclusion: 待下游 benchmark 评估后填写。
+  next_step: 运行评测，并在 evaluation.results.metrics 中填写各 benchmark 指标。
+

@@ -1,0 +1,20 @@
+---
+description: Keep experiment state, issues, and handoffs synchronized across windows
+alwaysApply: true
+---
+
+# Experiment Workflow
+
+When working on training, evaluation, inference, OPSD, checkpoints, datasets, or experiment scripts:
+
+1. Before acting, read `experiments/ACTIVE.md`, `experiments/LESSONS.md`, and the active registry YAML.
+2. Before launching a job, check for an existing process, owner, GPU allocation, job ID, and output directory.
+3. Register the current owner/window purpose, resources, command, and job ID in `experiments/ACTIVE.md`.
+4. Use one `experiment_id` for the same model setting; keep training and evaluation in the same registry file.
+5. Record actual parameters and artifact paths rather than relying on script defaults.
+6. On any failure, append an `issues` entry with symptom, evidence, root cause, solution, status, and prevention before retrying.
+7. Preserve resolved issues. Move reusable prevention guidance into `experiments/LESSONS.md`.
+8. Before handoff or completion, update `handoff`, `activity_log`, phase status, metrics, conclusion, and next action.
+9. Never put secrets, model weights, datasets, caches, or full logs in `experiments/`.
+10. Do not launch a duplicate job when shared state is unclear; inspect actual processes and artifacts first.
+

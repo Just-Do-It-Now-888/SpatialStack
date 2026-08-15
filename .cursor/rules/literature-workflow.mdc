@@ -1,0 +1,20 @@
+---
+description: Share verified paper knowledge across Vision-OPD research windows
+alwaysApply: true
+---
+
+# Literature Workflow
+
+When reading, comparing, or discussing papers related to Vision-OPD:
+
+1. First read `literature/INDEX.md`, `literature/SYNTHESIS.md`, and relevant files under `literature/papers/`.
+2. Search the index and stable arXiv/DOI metadata before creating a note; use the paper's method name in lowercase kebab-case as the filename, with one note per paper.
+3. Use `literature/templates/paper.md` for new notes.
+4. Separate paper claims from personal inference.
+5. Give each important claim a verifiable section, page, equation, figure, or table location.
+6. Mark unsupported or uncertain claims as `待核对`; do not present them as established facts.
+7. After reading, update the paper note and its entry in `literature/INDEX.md`.
+8. Put cross-paper agreements, conflicts, and applicability conditions in `literature/SYNTHESIS.md`.
+9. Put unresolved questions and testable hypotheses in `literature/OPEN_QUESTIONS.md`.
+10. Preserve corrections and disagreements instead of overwriting their history.
+

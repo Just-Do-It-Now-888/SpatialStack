@@ -1,0 +1,101 @@
+# Copy to experiments/registry/<experiment_id>.yaml before starting a run.
+experiment_id: YYYYMMDD_model_variant
+title: ""
+status: planned  # planned | running | completed | failed | cancelled
+
+created_at: "YYYY-MM-DDTHH:MM:SS+08:00"
+finished_at: null
+owner: ""
+
+goal: ""
+hypothesis: ""
+
+code:
+  git_commit: null
+  git_dirty: null
+
+environment:
+  conda_env: sr_opsd
+  nodes: null
+  gpus_per_node: null
+  gpu_type: null
+
+model:
+  backbone: ""
+  model_path: ""
+  geometry_encoder: ""
+  geometry_encoder_path: ""
+
+data:
+  training_datasets: []
+  dataset_version: ""
+
+training:
+  status: planned
+  entrypoint: ""
+  command: ""
+  parameters:
+    seed: 0
+    learning_rate: null
+    total_batch_size: null
+    epochs: null
+    feature_fusion_method: null
+    geometry_encoder_layers: []
+    geometry_fusion_layers: []
+  artifacts:
+    output_dir: ""
+    checkpoint: ""
+    train_log: ""
+  results:
+    metrics: {}
+    summary: ""
+    failure_reason: ""
+
+evaluation:
+  status: planned
+  entrypoint: ""
+  command: ""
+  benchmarks: []
+  parameters: {}
+  artifacts:
+    eval_root: ""
+  results:
+    metrics: {}
+    summary: ""
+    failure_reason: ""
+
+handoff:
+  current_phase: planning
+  last_updated: "YYYY-MM-DDTHH:MM:SS+08:00"
+  current_task: ""
+  owner: ""
+  active_job_id: null
+  resources: ""
+  blocker: ""
+  next_action: ""
+
+issues:
+  # Keep resolved issues to prevent regressions.
+  # - id: ISSUE-001
+  #   status: open  # open | mitigated | resolved
+  #   phase: training  # planning | training | evaluation | shared
+  #   discovered_at: "YYYY-MM-DDTHH:MM:SS+08:00"
+  #   symptom: ""
+  #   evidence: ""
+  #   root_cause: ""
+  #   solution: ""
+  #   prevention: ""
+  []
+
+activity_log:
+  # Append concise events so another window can reconstruct the experiment.
+  # - at: "YYYY-MM-DDTHH:MM:SS+08:00"
+  #   actor: ""
+  #   action: ""
+  #   result: ""
+  []
+
+notes:
+  conclusion: ""
+  next_step: ""
+
