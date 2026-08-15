@@ -1,6 +1,6 @@
 experiment_id: 20260816_qwen35_mvopsd_v0
 title: "MV-OPSD v0：多视角特权自蒸馏（teacher 看 N 视角，student 看 K<N 视角）"
-status: planned  # planned | running | completed | failed | cancelled
+status: running  # planned | running | completed | failed | cancelled
 
 created_at: "2026-08-16T02:20:00+08:00"
 finished_at: null
@@ -18,7 +18,7 @@ hypothesis: >
   说明增益来自 on-policy 自蒸馏本身而不是视角特权。
 
 code:
-  git_commit: "4482ab7"
+  git_commit: "10f3440"  # main arm 启动时的工作区版本，无未提交改动
   git_dirty: false
   key_files:
     - scripts/opsd/mvopsd/            # geometry / markers / views / sources 工具库
@@ -93,7 +93,7 @@ data:
       - obj_frame_locate
 
 training:
-  status: planned
+  status: running  # main arm 训练中，noprivilege 未启动
   entrypoint: scripts/opsd/run_mvopsd.sh
   command: |
     scripts/opsd/run_mvopsd.sh main          # 特权组
@@ -119,7 +119,7 @@ training:
   artifacts:
     output_dir: "checkpoints/20260816_qwen35_mvopsd_v0_{main,noprivilege}"
     checkpoint: ""
-    train_log: "logs/train/20260816_qwen35_mvopsd_v0_{main,noprivilege}"
+    train_log: "logs/train/20260816_qwen35_mvopsd_v0_main/train_20260816_035443.log"
     rollouts: "rollouts/20260816_qwen35_mvopsd_v0_{main,noprivilege}"
   results:
     metrics: {}
@@ -147,18 +147,18 @@ evaluation:
     failure_reason: ""
 
 handoff:
-  current_phase: "数据与流程就绪，等待正式训练"
-  last_updated: "2026-08-16T03:40:00+08:00"
-  current_task: "P0-5 端到端 smoke 已通过（两个 arm 各 2 步），下一步跑 300 步正式训练"
+  current_phase: "main arm 训练中"
+  last_updated: "2026-08-16T03:56:00+08:00"
+  current_task: "300 步 main arm 训练，save_freq=50"
   owner: "cursor-window-mvopsd"
-  active_job_id: null
-  resources: "8 卡全空闲；训练时整机独占"
+  active_job_id: "PID 3671731 (python3 -m verl.trainer.main_ppo)"
+  resources: "单机 8 卡整机独占，勿并行启动其他 GPU 作业"
   blocker: ""
   next_action: >
-    1) 提交代码并把 git_commit 写回本文件；
-    2) `scripts/opsd/run_mvopsd.sh main` 起 300 步；
-    3) 训练中盯 self_distillation/raw_jsd_token_mean 与 actor/grad_norm；
-    4) 完成后 merge checkpoint 并跑帧预算曲线。
+    1) 训练中盯 self_distillation/raw_jsd_token_mean、actor/grad_norm、
+       teacher_always_on_fraction（应恒为 1.0）与 perf/max_memory_reserved_gb；
+    2) main 完成后跑 noprivilege 对照组；
+    3) merge checkpoint 并跑帧预算曲线（1/2/4/8/16/32 帧）。
 
 issues:
   - id: ISSUE-001
@@ -240,6 +240,11 @@ activity_log:
       policy_fallback_fraction 0.0、vopd_loss 0.028-0.036、grad_norm 10-14；
       noprivilege：同样配置下 vopd_loss ~5e-10，即 teacher 视角与 student 相同时损失退化为 0，
       说明训练信号确实来自视角特权
+
+  - at: "2026-08-16T03:54:43+08:00"
+    actor: cursor-window-mvopsd
+    action: "启动 main arm 正式训练（300 步，batch 64，rollout_n 4，lr 2e-6）"
+    result: "PID 3671731；启动前确认 8 卡空闲、checkpoints 目录为空、工作区无未提交改动"
 
 notes:
   conclusion: ""

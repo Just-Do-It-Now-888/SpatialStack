@@ -20,15 +20,18 @@
 ### `20260816_qwen35_mvopsd_v0`
 
 - Registry：`experiments/registry/20260816_qwen35_mvopsd_v0.yaml`
-- 当前阶段：数据与训练流水线已就绪，P0-5 smoke 已通过，正式训练未启动
-- 当前任务：起 `scripts/opsd/run_mvopsd.sh main` 的 300 步训练
+- 当前阶段：**main arm 训练中**（300 步），noprivilege 对照组待跑
+- 当前任务：`scripts/opsd/run_mvopsd.sh main`，代码版本 `10f3440`
 - 运行窗口/负责人：cursor-window-mvopsd
-- GPU/节点：单机 8 卡，训练时整机独占（当前空闲）
-- 活跃进程或作业 ID：无
-- 输出目录：`checkpoints/20260816_qwen35_mvopsd_v0_{main,noprivilege}`
+- GPU/节点：单机 8 卡整机独占（0-7 全部占用，勿启动其他 GPU 作业）
+- 活跃进程或作业 ID：PID 3671731（`python3 -m verl.trainer.main_ppo`），2026-08-16 03:54 启动
+- 输出目录：`checkpoints/20260816_qwen35_mvopsd_v0_main`，日志
+  `logs/train/20260816_qwen35_mvopsd_v0_main/train_20260816_035443.log`，
+  rollout `rollouts/20260816_qwen35_mvopsd_v0_main`
 - 阻塞项：无
-- 下一步：提交代码并把 `git_commit` 写回 registry，再启动 main arm
-- 最后更新：2026-08-16 03:40 UTC+8
+- 下一步：main 跑完（预计约 9-16 小时）后启动 noprivilege 对照组，
+  再 merge checkpoint 跑帧预算曲线
+- 最后更新：2026-08-16 03:56 UTC+8
 
 ## 窗口接管规则
 
