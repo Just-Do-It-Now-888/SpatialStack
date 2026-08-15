@@ -20,7 +20,8 @@
 ### `20260816_qwen35_mvopsd_v0`
 
 - Registry：`experiments/registry/20260816_qwen35_mvopsd_v0.yaml`
-- 当前阶段：**main arm 训练中**（300 步），noprivilege 对照组待跑
+- 当前阶段：**main arm 训练中**（300 步），训练退出后自动接评测；
+  noprivilege 对照组已取消（用户决定，2026-08-16 04:08）
 - 当前任务：`scripts/opsd/run_mvopsd.sh main`，代码版本 `10f3440`
 - 运行窗口/负责人：cursor-window-mvopsd
 - GPU/节点：单机 8 卡整机独占（0-7 全部占用，勿启动其他 GPU 作业）
@@ -28,10 +29,14 @@
 - 输出目录：`checkpoints/20260816_qwen35_mvopsd_v0_main`，日志
   `logs/train/20260816_qwen35_mvopsd_v0_main/train_20260816_035443.log`，
   rollout `rollouts/20260816_qwen35_mvopsd_v0_main`
+- 已排队的后续作业：`scripts/opsd/after_train_eval.sh`（PID 3716202），
+  守着训练进程退出后自动 merge `global_step_300` 并依次跑
+  「训练模型」与「SFT 基线」两条 VSI-Bench 帧预算曲线（1/2/4/8/16/32 帧），
+  日志 `logs/train/20260816_qwen35_mvopsd_v0_main/after_train_eval.log`
 - 阻塞项：无
-- 下一步：main 跑完（预计约 9-16 小时）后启动 noprivilege 对照组，
-  再 merge checkpoint 跑帧预算曲线
-- 最后更新：2026-08-16 03:56 UTC+8
+- 下一步：训练约 6.5 小时后结束（预计 10:40 前后），评测自动开始；
+  评测期间同样整机独占，勿插入其他 GPU 作业
+- 最后更新：2026-08-16 04:10 UTC+8
 
 ## 窗口接管规则
 

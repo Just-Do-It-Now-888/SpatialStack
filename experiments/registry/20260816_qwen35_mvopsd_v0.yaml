@@ -93,11 +93,11 @@ data:
       - obj_frame_locate
 
 training:
-  status: running  # main arm 训练中，noprivilege 未启动
+  status: running  # 只跑 main arm；noprivilege 对照组按用户决定取消（2026-08-16 04:08）
   entrypoint: scripts/opsd/run_mvopsd.sh
   command: |
-    scripts/opsd/run_mvopsd.sh main          # 特权组
-    scripts/opsd/run_mvopsd.sh noprivilege   # 对照组：teacher 视角 == student 视角
+    scripts/opsd/run_mvopsd.sh main          # 特权组（实际执行）
+    # scripts/opsd/run_mvopsd.sh noprivilege # 对照组已取消，见 notes.scope_change
   parameters:
     seed: 20260816
     learning_rate: 2.0e-6
@@ -127,11 +127,12 @@ training:
     failure_reason: ""
 
 evaluation:
-  status: planned
-  entrypoint: scripts/opsd/eval_frame_budget.sh
+  status: queued  # 训练进程退出后由 scripts/opsd/after_train_eval.sh 自动接续
+  entrypoint: scripts/opsd/after_train_eval.sh
   command: |
-    scripts/opsd/merge_mvopsd_ckpt.sh checkpoints/<exp>/global_step_N
-    scripts/opsd/eval_frame_budget.sh output/<exp>_global_step_N_hf <exp>
+    scripts/opsd/after_train_eval.sh 3671731 20260816_qwen35_mvopsd_v0_main 300
+    # 内部依次执行：等待训练进程退出 -> merge global_step_300 -> 训练模型帧预算曲线
+    # -> SFT 基线帧预算曲线（基线曲线必须跑，否则低帧结果没有比较对象）
   benchmarks: [vsibench]
   parameters:
     frames: [1, 2, 4, 8, 16, 32]
@@ -140,7 +141,14 @@ evaluation:
       主张是「低帧预算下更强」，所以必须看整条帧预算曲线；
       只报 32 帧的单点既不能证实也不能证伪。
   artifacts:
-    eval_root: "logs/eval/20260816_qwen35_mvopsd_v0_{main,noprivilege}"
+    eval_root: "logs/eval/20260816_qwen35_mvopsd_v0_main"
+    baseline_eval_root: "logs/eval/sft_baseline_frame_curve"
+    merged_model: "output/20260816_qwen35_mvopsd_v0_main_global_step_300_hf"
+    chain_log: "logs/train/20260816_qwen35_mvopsd_v0_main/after_train_eval.log"
+  baseline_reference:
+    vsibench_32frames: 64.235697
+    source: "logs/eval/spatialstack_qwen35_4b_novggt_aligned/20260814/vsibench/output__spatialstack_qwen35_novggt_aligned/20260814_173139_results.json"
+    note: "基线此前只测过 32 帧这一个点，1/2/4/8/16 帧需要本次补齐"
   results:
     metrics: {}
     summary: ""
@@ -158,7 +166,8 @@ handoff:
     1) 训练中盯 self_distillation/raw_jsd_token_mean、actor/grad_norm、
        teacher_always_on_fraction（应恒为 1.0）与 perf/max_memory_reserved_gb；
     2) main 完成后跑 noprivilege 对照组；
-    3) merge checkpoint 并跑帧预算曲线（1/2/4/8/16/32 帧）。
+    3) 训练退出后 after_train_eval.sh（PID 3716202）自动 merge 并跑两条帧预算曲线；
+    4) 对比两条曲线的低帧段，判断特权视角是否带来增益。
 
 issues:
   - id: ISSUE-001
@@ -247,6 +256,16 @@ activity_log:
     result: "PID 3671731；启动前确认 8 卡空闲、checkpoints 目录为空、工作区无未提交改动"
 
 notes:
+  scope_change:
+    at: "2026-08-16T04:08:00+08:00"
+    decision: "取消 noprivilege 对照组，训练完成后直接进入评测"
+    by: "用户"
+    consequence: >
+      失去「增益来自视角特权还是来自 on-policy 自蒸馏本身」的直接对照。
+      P0-5 smoke 的证据仍在：无特权配置下 vopd_loss 约 5e-10，
+      即 teacher 与 student 视角相同时训练信号退化为零，
+      这说明梯度确实来自视角差异，但不能替代整条训练后的对照曲线。
+      若 main arm 出现明显增益且需要归因，需要补跑该对照组。
   conclusion: ""
   next_step: >
     正式训练前把 git_commit 写回本文件；main 与 noprivilege 两个 arm 共用同一份 plan，
