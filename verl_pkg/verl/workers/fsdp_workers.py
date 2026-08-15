@@ -332,7 +332,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
+        override_model_config = dict(override_model_config)
         attn_implementation = override_model_config.get("attn_implementation", "flash_attention_2")
+        # transformers>=5 propagates a scalar attn_implementation to every sub-config, so a vision
+        # tower that needs a different kernel has to be requested through the mapping form.
+        vision_attn_implementation = override_model_config.pop("vision_attn_implementation", None)
+        if vision_attn_implementation is not None:
+            attn_implementation = {"": attn_implementation, "model.visual": vision_attn_implementation}
         actor_model_config = AutoConfig.from_pretrained(
             local_path, trust_remote_code=trust_remote_code, attn_implementation=attn_implementation
         )

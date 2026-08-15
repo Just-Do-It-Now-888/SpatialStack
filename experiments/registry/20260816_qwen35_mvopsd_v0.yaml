@@ -1,0 +1,248 @@
+experiment_id: 20260816_qwen35_mvopsd_v0
+title: "MV-OPSD v0：多视角特权自蒸馏（teacher 看 N 视角，student 看 K<N 视角）"
+status: planned  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-16T02:20:00+08:00"
+finished_at: null
+owner: "cursor-window-mvopsd"
+
+goal: >
+  把 Vision-OPD 的「裁剪特权视图教全图」换成「多视角特权教有限视角」：
+  teacher 看同一场景的 N 个视角，student 看其中 K < N 个视角，
+  两者在 student 自己采样出的回答上做 token 级分布匹配（JSD）。
+  唯一的特权轴是视角数量，分辨率、marker、prompt 模板全部对齐。
+hypothesis: >
+  低帧预算下（1-4 帧）的空间推理正确率会提升，因为 teacher 的多视角后验
+  给出了单帧看不到的空间约束；高帧预算（32 帧）下的提升会小很多。
+  若 noprivilege 对照组（teacher 视角 == student 视角）也提升，
+  说明增益来自 on-policy 自蒸馏本身而不是视角特权。
+
+code:
+  git_commit: null  # 启动训练前填入实际 commit
+  git_dirty: null
+  key_files:
+    - scripts/opsd/mvopsd/            # geometry / markers / views / sources 工具库
+    - scripts/opsd/build_mvopsd_plan.py        # stage 1：采样 + 过滤 + K 预算 + prompt 改写
+    - scripts/opsd/materialize_mvopsd_views.py # stage 2：抽帧 + resize + marker 烘焙
+    - scripts/opsd/write_mvopsd_parquet.py     # stage 3：写 verl parquet
+    - scripts/opsd/check_mvopsd_geometry.py    # 几何一致性校验
+    - scripts/opsd/run_mvopsd.sh
+    - scripts/opsd/merge_mvopsd_ckpt.sh
+    - scripts/opsd/eval_frame_budget.sh
+    - scripts/opsd/mvopsd_reward.py
+    - verl_pkg/verl/trainer/config/mvopsd.yaml
+    - verl_pkg/verl/workers/fsdp_workers.py    # 新增 vision_attn_implementation 开关
+
+environment:
+  conda_env: system python3.12（非 conda）
+  nodes: 1
+  gpus_per_node: 8
+  gpu_type: "95 GiB / 卡"
+  notes: >
+    flash_attn 2.7.4.post1+25.11、transformers 5.5.0、torch 2.10.0+cu128、vllm 0.18.0。
+    本镜像缺 jmespath（vllm sagemaker 入口依赖），已 pip 安装。
+    本镜像缺 decord，stage 2 抽帧改用 PyAV。
+
+model:
+  backbone: "Qwen3.5-4B (Qwen3_5ForConditionalGeneration)"
+  model_path: "./output/spatialstack_qwen35_novggt_aligned"
+  geometry_encoder: "none（no-VGGT 对齐版 SFT 权重）"
+  geometry_encoder_path: ""
+  base_experiment: 20260813_qwen35_geo_baseline
+
+data:
+  training_datasets:
+    - spar_234k
+    - llava_hound_64k
+    - vlm3r_scannet
+    - vsi_appr_order
+  dataset_version: "mvopsd-v0 (seed 20260816, K menu 1/2/4)"
+  build_pipeline:
+    stage1: "python3 scripts/opsd/build_mvopsd_plan.py"
+    stage2: "python3 scripts/opsd/materialize_mvopsd_views.py"
+    stage3: "python3 scripts/opsd/write_mvopsd_parquet.py"
+  artifacts:
+    plan: "data/mvopsd/plan/plan.jsonl"
+    stats: "data/mvopsd/plan/stats.json"
+    view_cache: "data/mvopsd/views (474,757 张，24 GB)"
+    train_main: "data/mvopsd/parquet/main_train.parquet (124,306)"
+    train_noprivilege: "data/mvopsd/parquet/noprivilege_train.parquet (124,306)"
+    holdout: "data/mvopsd/parquet/{main,noprivilege}_holdout.parquet (2,174)"
+  composition:
+    llava_hound_64k: 38009
+    spar_3view: 34470
+    vlm3r_scannet: 31067
+    spar_32view: 21025
+    vsi_appr_order: 1909
+  student_view_budget:
+    K1: 28700
+    K2: 61470
+    K4: 36310
+  exclusions:
+    single_view_no_gap: 45336        # N=1，无法构造特权差
+    zero_privilege_all_views_required: 13781
+    required_views_exceed_k_budget: 2741
+    answer_references_view_ordinal: 241
+    vsibench_scene_leak: 19          # scene0685_00
+    excluded_spar_types:
+      - position_matching
+      - distance_infer_center_oc_mv
+      - view_change_infer
+      - camera_motion_infer
+      - appearance_order
+      - obj_frame_locate
+
+training:
+  status: planned
+  entrypoint: scripts/opsd/run_mvopsd.sh
+  command: |
+    scripts/opsd/run_mvopsd.sh main          # 特权组
+    scripts/opsd/run_mvopsd.sh noprivilege   # 对照组：teacher 视角 == student 视角
+  parameters:
+    seed: 20260816
+    learning_rate: 2.0e-6
+    total_batch_size: 64        # 64 prompts x rollout_n 4 = 256 序列/步
+    rollout_n: 4
+    total_training_steps: 300
+    max_prompt_length: 4096
+    max_response_length: 512
+    loss_mode: vopd
+    loss_agg_mode: seq-mean-token-mean
+    alpha: 0.5
+    is_clip: 2.0
+    distillation_topk: 100
+    teacher_regularization: ema
+    teacher_update_rate: 0.05
+    image_patch_size: 16        # Qwen3.5 patch 16 / merge 2，verl 默认 14 会错位
+    gpu_memory_utilization: 0.35
+    vision_attn_implementation: sdpa
+  artifacts:
+    output_dir: "checkpoints/20260816_qwen35_mvopsd_v0_{main,noprivilege}"
+    checkpoint: ""
+    train_log: "logs/train/20260816_qwen35_mvopsd_v0_{main,noprivilege}"
+    rollouts: "rollouts/20260816_qwen35_mvopsd_v0_{main,noprivilege}"
+  results:
+    metrics: {}
+    summary: ""
+    failure_reason: ""
+
+evaluation:
+  status: planned
+  entrypoint: scripts/opsd/eval_frame_budget.sh
+  command: |
+    scripts/opsd/merge_mvopsd_ckpt.sh checkpoints/<exp>/global_step_N
+    scripts/opsd/eval_frame_budget.sh output/<exp>_global_step_N_hf <exp>
+  benchmarks: [vsibench]
+  parameters:
+    frames: [1, 2, 4, 8, 16, 32]
+    disable_thinking: true
+    note: >
+      主张是「低帧预算下更强」，所以必须看整条帧预算曲线；
+      只报 32 帧的单点既不能证实也不能证伪。
+  artifacts:
+    eval_root: "logs/eval/20260816_qwen35_mvopsd_v0_{main,noprivilege}"
+  results:
+    metrics: {}
+    summary: ""
+    failure_reason: ""
+
+handoff:
+  current_phase: "数据与流程就绪，等待正式训练"
+  last_updated: "2026-08-16T03:40:00+08:00"
+  current_task: "P0-5 端到端 smoke 已通过（两个 arm 各 2 步），下一步跑 300 步正式训练"
+  owner: "cursor-window-mvopsd"
+  active_job_id: null
+  resources: "8 卡全空闲；训练时整机独占"
+  blocker: ""
+  next_action: >
+    1) 提交代码并把 git_commit 写回本文件；
+    2) `scripts/opsd/run_mvopsd.sh main` 起 300 步；
+    3) 训练中盯 self_distillation/raw_jsd_token_mean 与 actor/grad_norm；
+    4) 完成后 merge checkpoint 并跑帧预算曲线。
+
+issues:
+  - id: ISSUE-001
+    status: resolved
+    phase: training
+    discovered_at: "2026-08-16T02:55:00+08:00"
+    symptom: "verl 启动即失败：ModuleNotFoundError: No module named 'jmespath'"
+    evidence: "vllm/entrypoints/sagemaker/api_router.py 导入 model_hosting_container_standards 链路"
+    root_cause: "镜像里 vllm 0.18 的 sagemaker 入口缺依赖"
+    solution: "pip install jmespath (1.1.0)"
+    prevention: "换环境后先跑一次 SMOKE=1，不要直接起正式训练"
+
+  - id: ISSUE-002
+    status: resolved
+    phase: training
+    discovered_at: "2026-08-16T03:00:00+08:00"
+    symptom: "vLLM 起不来：Free memory on device cuda:0 (45.76/95.08 GiB) < gpu_memory_utilization 0.6"
+    evidence: "/tmp/mvopsd_smoke.log；FSDP 以 fp32 建 actor + ref(EMA teacher) 两份模型"
+    root_cause: "同一 worker 里 actor、EMA teacher 和 vLLM 共用一张卡，0.6 的预留过大"
+    solution: "mvopsd.yaml 把 rollout.gpu_memory_utilization 降到 0.35；实测训练峰值 reserved 约 52-58 GB"
+    prevention: "改 batch、rollout_n 或视角上限后重新看 perf/max_memory_reserved_gb"
+
+  - id: ISSUE-003
+    status: resolved
+    phase: training
+    discovered_at: "2026-08-16T03:05:00+08:00"
+    symptom: >
+      actor 前向在视觉塔崩：RuntimeError: Cannot access data pointer of Tensor
+      that doesn't have storage（flash_attn_varlen_func）
+    evidence: >
+      脱离 verl 也能复现；最小复现显示 flash_attn 2.7.4.post1+25.11 的
+      varlen_fwd 只在 causal=False 且 out=None 时崩，causal=True 或预分配 out 都正常
+    root_cause: >
+      本镜像的 flash-attn 构建对非因果 varlen 路径有 bug。SFT 加载 Qwen3.5 时
+      不传 attn_implementation 所以没踩到；verl 默认对全模型强制 flash_attention_2，
+      而视觉塔是双向注意力
+    solution: >
+      fsdp_workers.py 增加 override_config.vision_attn_implementation，
+      用 transformers 5 的映射形式只把 model.visual 换成 sdpa，语言塔保持
+      flash_attention_2（use_remove_padding 打包序列需要 varlen）
+    prevention: "见 LESSONS.md LESSON-005"
+
+  - id: ISSUE-004
+    status: resolved
+    phase: training
+    discovered_at: "2026-08-16T03:26:00+08:00"
+    symptom: "smoke 复跑直接从 step 3 开始，并且第一次 smoke 把 54 GB checkpoint 写进了正式实验目录"
+    evidence: "日志 'Found checkpoint ... global_step_2' / 'Resuming from'；checkpoints/20260816_qwen35_mvopsd_v0_main"
+    root_cause: >
+      run_mvopsd.sh 在加 _smoke 后缀之前就算好了 CKPT_DIR/LOG_DIR/ROLLOUT_DIR；
+      同时 verl 的 trainer.resume_mode 默认 auto
+    solution: "把 SMOKE 分支移到目录计算之前，并在 SMOKE 时追加 trainer.resume_mode=disable；已删除误写的产物"
+    prevention: "见 LESSONS.md LESSON-006"
+
+activity_log:
+  - at: "2026-08-16T00:30:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "git init + 基线提交 73e2fb3，备份 SFT checkpoint"
+    result: "LESSON-001 关闭，实验可追溯"
+  - at: "2026-08-16T01:30:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "探针 SFT 图像几何（scripts/opsd/probe_sft_image_geometry.py）"
+    result: "确认 384x512 / 192 token 每视角，patch 16 merge 2，对齐因子 32"
+  - at: "2026-08-16T02:20:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "stage 1-3 数据流水线跑通"
+    result: "126,480 条计划 -> 124,306 训练 + 2,174 holdout；474,757 张视角缓存 24 GB"
+  - at: "2026-08-16T02:45:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "scripts/opsd/check_mvopsd_geometry.py 校验几何"
+    result: >
+      student 与 teacher 图像路径逐像素一致；缓存视角与 SFT 流水线的平均像素差 0.77（JPEG 量化）；
+      teacher 视觉 token 峰值 6,144，低于 max_reprompt_len 12,288
+  - at: "2026-08-16T03:30:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "P0-5 端到端 smoke（80 条分层样本，两个 arm 各 2 步）"
+    result: >
+      main：teacher_always_on_fraction 1.0、teacher_image_swap_fraction 1.0、
+      policy_fallback_fraction 0.0、vopd_loss 0.028-0.036、grad_norm 10-14；
+      noprivilege：同样配置下 vopd_loss ~5e-10，即 teacher 视角与 student 相同时损失退化为 0，
+      说明训练信号确实来自视角特权
+
+notes:
+  conclusion: ""
+  next_step: >
+    正式训练前把 git_commit 写回本文件；main 与 noprivilege 两个 arm 共用同一份 plan，
+    只有 teacher 视角集合不同，所以可以直接比较。

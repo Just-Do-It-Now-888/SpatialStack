@@ -6,8 +6,11 @@
 /output/
 /backup/
 /checkpoints/
+/rollouts/
 /cache/
 /logs/
+# hydra working directory created by verl runs
+/outputs/
 /wandb/
 /tensorboard_log/
 /env/

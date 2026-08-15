@@ -1,0 +1,112 @@
+defaults:
+  - ppo_trainer
+  - user
+  - _self_
+
+# MV-OPSD v0: the teacher sees N views of a scene, the student sees K < N of the
+# same views at the same resolution, and the two are matched token-by-token on
+# the student's own rollout. The only privileged axis is view count.
+#
+# Launch with scripts/opsd/run_mvopsd.sh, which pins the arm-specific overrides
+# (train_files, experiment_name) and the PYTHONPATH.
+
+actor_rollout_ref:
+  model:
+    path: ./output/spatialstack_qwen35_novggt_aligned
+    override_config:
+      # flash_attn 2.7.4.post1+25.11 in this image raises "Cannot access data
+      # pointer of Tensor that doesn't have storage" for every non-causal
+      # varlen_fwd call, which is exactly what the bidirectional vision tower
+      # issues. SFT never hit it because it loads Qwen3.5 without
+      # attn_implementation. The language tower keeps flash_attention_2 because
+      # use_remove_padding packs sequences and needs varlen attention.
+      vision_attn_implementation: sdpa
+  actor:
+    # 64 prompts x 4 rollouts = 256 sequences per step, one mini-batch, so the
+    # update stays strictly on-policy.
+    ppo_mini_batch_size: 64
+    ppo_micro_batch_size_per_gpu: 1
+    policy_loss:
+      loss_mode: vopd
+    self_distillation:
+      teacher_always_on: True
+      teacher_image_key: teacher_images
+      # Must stay null. "answer_hint" switches to a text-hint teacher, which is
+      # a different method entirely (ray_trainer.py:1168).
+      teacher_prompt_mode: null
+      teacher_model_source: legacy
+      teacher_regularization: ema
+      teacher_update_rate: 0.05
+      full_logit_distillation: True
+      distillation_topk: 100
+      distillation_add_tail: True
+      alpha: 0.5
+      is_clip: 2.0
+      # SPAR N=32 at 192 tokens/view = 6,144 visual tokens, plus question and
+      # response. Teacher prompts are truncated at this length, and truncating a
+      # multimodal prompt corrupts image-token accounting, so keep the headroom.
+      max_reprompt_len: 12288
+      # Fail loudly if a sample reaches the teacher without its views, instead of
+      # silently training something we cannot describe.
+      fallback_to_policy_loss_on_missing_teacher: False
+    # Required, not optional: under the default token-mean, SPAR 3-view would
+    # take 57% of the gradient with 27% of the samples, while vlm3r_scannet
+    # (1-token answers, closest to VSI-Bench) would get under 1%.
+    loss_agg_mode: seq-mean-token-mean
+    optim:
+      lr: 2.0e-6
+  rollout:
+    n: 4
+    calculate_log_probs: True
+    # Must be >= max(N, K); vLLM rejects prompts above this image count.
+    limit_images: 40
+    # The actor, the EMA teacher and their activations live in the same worker,
+    # so vLLM only gets a third of the card.
+    gpu_memory_utilization: 0.35
+    max_model_len: 8192
+
+algorithm:
+  # Only used to skip the critic; the vopd loss ignores advantages.
+  adv_estimator: grpo
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+data:
+  train_files: ["./data/mvopsd/parquet/main_train.parquet"]
+  val_files: []
+  train_batch_size: 64
+  image_key: images
+  max_prompt_length: 4096
+  max_response_length: 512
+  # verl defaults to 14; Qwen3.5 uses patch 16 / merge 2, so the alignment factor
+  # is 32. At 14 the student's views get resized to 392x504 while the teacher's
+  # stay 384x512, which silently reintroduces resolution as a second privileged
+  # axis (see the smart_resize check in scripts/opsd/tests).
+  image_patch_size: 16
+  # Views are validated offline by write_mvopsd_parquet.py; re-running the
+  # processor over 126k multi-image prompts at startup costs hours.
+  filter_overlong_prompts: False
+  truncation: error
+  shuffle: True
+  seed: 20260816
+  apply_chat_template_kwargs:
+    enable_thinking: false
+
+custom_reward_function:
+  path: ./scripts/opsd/mvopsd_reward.py
+  name: compute_score
+
+trainer:
+  n_gpus_per_node: 8
+  nnodes: 1
+  total_epochs: 1
+  # v0 budget: 300 steps x 64 prompts = 19,200 samples, 14% of the pool. If the
+  # signal is there, resume from the checkpoint rather than rebuilding data.
+  total_training_steps: 300
+  save_freq: 50
+  test_freq: -1
+  val_before_train: False
+  logger: ["console"]
+  project_name: MV-OPSD
+  experiment_name: 20260816_qwen35_mvopsd_v0_main

@@ -17,6 +17,19 @@
 - 下一步：启动评测前检查 checkpoint 中存在 `config.json`
 - 最后更新：2026-08-13 11:24 UTC+8
 
+### `20260816_qwen35_mvopsd_v0`
+
+- Registry：`experiments/registry/20260816_qwen35_mvopsd_v0.yaml`
+- 当前阶段：数据与训练流水线已就绪，P0-5 smoke 已通过，正式训练未启动
+- 当前任务：起 `scripts/opsd/run_mvopsd.sh main` 的 300 步训练
+- 运行窗口/负责人：cursor-window-mvopsd
+- GPU/节点：单机 8 卡，训练时整机独占（当前空闲）
+- 活跃进程或作业 ID：无
+- 输出目录：`checkpoints/20260816_qwen35_mvopsd_v0_{main,noprivilege}`
+- 阻塞项：无
+- 下一步：提交代码并把 `git_commit` 写回 registry，再启动 main arm
+- 最后更新：2026-08-16 03:40 UTC+8
+
 ## 窗口接管规则
 
 1. 启动任务前填写负责人、GPU/节点、进程或作业 ID。
