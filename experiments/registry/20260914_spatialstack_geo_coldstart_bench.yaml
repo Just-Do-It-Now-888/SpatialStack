@@ -8,7 +8,7 @@ owner: cursor-window-spatialstack
 
 goal: >
   对 output/spatialstack_qwen35_train（20260909 geo SFT）补跑 CV-Bench、BLINK-Spatial、
-  SPAR-Bench 冷启动分数，作为 MV-OPSD 三集模拟/对照的真实锚点。VSI 已有实测 66.59。
+  SPAR-Bench 冷启动分数，作为 MV-OPSD 对照的真实锚点。VSI 已有实测 66.59。
 
 relations:
   init_checkpoint: 20260909_spatialstack_qwen35_geo

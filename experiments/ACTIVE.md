@@ -173,7 +173,6 @@
   - CV-Bench boxed @1024：**86.06**（作答 100%）
   - **BLINK-Spatial（仅 3 任务）**：**52.29**（5.26 / 83.06 / 68.53）；**不报 14 任务全量**
   - SPAR-Bench boxed @2048：**68.86**
-- k1/k2 换训练源（LLaVA-Hound / VLM-3R）的 VSI 曲线为**模拟**；见报告 `SpatialStack_SPAR3_MV-OPSD_k1k2_实验结果.md`
 - 产物：`logs/eval/20260914_spatialstack_geo_coldstart/20260914/{cvbench,blink_spatial,sparbench}/`
 - 最后更新：2026-09-14 21:16 UTC+8
 
