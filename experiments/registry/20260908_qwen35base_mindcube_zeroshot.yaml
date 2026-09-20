@@ -1,0 +1,105 @@
+experiment_id: 20260908_qwen35base_mindcube_zeroshot
+title: "Qwen3.5-4B zero-shot MindCube tinybench（transformers 官方题面）"
+status: completed
+created_at: "2026-09-08T14:30:00+08:00"
+finished_at: "2026-09-08T14:58:00+08:00"
+owner: cursor-window-mvopsd
+
+goal: >
+  复测 Qwen3.5-4B 发布权重在 MindCube tinybench（1050 题）上的 zero-shot 分数。
+  协议与 20260906 基座锚点相同：官方 input_prompt、greedy 2048、disable_thinking、
+  transformers 5.3.0 八卡分片。不走 lmms-eval mindcube_tiny（LESSON-003）。
+  新 dump 单独落盘，不覆盖 logs/eval/20260906_qwen35_mindcube_sft/baseline/。
+
+hypothesis: >
+  同协议重跑应落在 46.86 附近。实测与 20260906 锚点逐项相同。
+  不可与 SFT ckpt-314（74.48 / 69.81）或训练内 vLLM 锚点（74.29 / 70.57）并列。
+
+code:
+  git_commit: null
+  git_dirty: null
+
+environment:
+  conda_env: spatialstack-qwen35
+  python: /home/c30084464/miniconda3/envs/spatialstack-qwen35/bin/python
+  transformers: "5.3.0"
+  PYTHONNOUSERSITE: "1"
+  nodes: node-A
+  hostname: dsw-455344-95d655c8f-xm7dq
+  gpus_per_node: 8
+  gpu_type: H20
+
+model:
+  backbone: Qwen3.5-4B
+  model_path: models/Qwen3.5-4B
+
+data:
+  rows: 3DThinker/MindCube-main/data/prompts/general/MindCube_tinybench_raw_qa.jsonl
+  n: 1050
+  image_root: 3DThinker/MindCube-main/data
+  type_counts: {among: 600, around: 250, rotation: 200}
+
+evaluation:
+  status: completed
+  entrypoint: scripts/mindcube/run_mindcube_eval.sh
+  command: >
+    MODEL=./models/Qwen3.5-4B
+    OUT_DIR=logs/eval/20260908_qwen35base_mindcube_zeroshot
+    bash scripts/mindcube/run_mindcube_eval.sh
+  benchmarks: [mindcube_tinybench]
+  parameters:
+    engine: transformers
+    shards: 8
+    decoding: greedy
+    max_new_tokens: 2048
+    enable_thinking: false
+    max_pixels: 1605632
+    min_pixels: 200704
+    prompt: official input_prompt as-is
+    scoring: lmms_eval.tasks.mindcube.utils.mindcube_process_results
+  artifacts:
+    eval_root: logs/eval/20260908_qwen35base_mindcube_zeroshot
+    summary: logs/eval/20260908_qwen35base_mindcube_zeroshot/summary.json
+    samples: logs/eval/20260908_qwen35base_mindcube_zeroshot/samples.jsonl
+    prior_anchor: logs/eval/20260906_qwen35_mindcube_sft/baseline
+  results:
+    metrics:
+      n: 1050
+      overall: 46.86
+      among: 42.50
+      around: 58.80
+      rotation: 45.00
+      unreadable_frac: 0.0
+      output_tokens_median: 287.5
+      output_tokens_mean: 352.5
+      output_tokens_max: 2048
+      hit_cap_frac: 2.0
+      visual_tokens_per_image_median: 300
+    summary: >
+      Bit-identical to the 20260906 baseline dump on all reported fields.
+      Driver PID 426123; ~25 min wall clock; 8 GPUs released.
+    prior_anchor_20260906:
+      overall: 46.86
+      among: 42.50
+      around: 58.80
+      rotation: 45.00
+
+handoff:
+  current_phase: completed
+  last_updated: "2026-09-08T14:58:00+08:00"
+  current_task: ""
+  owner: cursor-window-mvopsd
+  active_job_id: null
+  resources: "node-A 8×H20 idle"
+  blocker: ""
+  next_action: "SPAR3 MindCube zero-shot is not in this experiment; run separately if needed"
+
+issues: []
+
+activity_log:
+  - timestamp: "2026-09-08T14:30:00+08:00"
+    event: launched
+    detail: "driver PID 426123; GPUs idle on node-A; new OUT_DIR"
+  - timestamp: "2026-09-08T14:58:00+08:00"
+    event: completed
+    detail: "overall 46.86 identical to 20260906; GPUs released"

@@ -1,0 +1,148 @@
+experiment_id: 20260905_cvbench_blink_sample
+title: "基座 vs SPAR3 K=1 step 55：CV-Bench + BLINK-Spatial sample"
+status: partial
+completed_at: "2026-09-05T03:21:55+08:00"
+created_at: "2026-09-05T02:20:00+08:00"
+owner: cursor-window-mvopsd
+node: node-B
+
+goal: >
+  对照表里 CV-Bench 与 BLINK 只有 greedy。按 VSI sample 同一套解码
+  （t=1.0 / top_p=0.8 / seed=20260904，单次采样，非 Avg@12）补齐。
+  不可与 greedy 并列上报。
+
+models:
+  base: models/Qwen3.5-4B
+  spar3: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+
+protocol:
+  launcher: scripts/opsd/run_cvbench_blink_sample_chain.sh
+  harness: scripts/evaluation/eval.sh
+  conda_env: sr_opsd
+  model_impl: qwen3_5
+  disable_thinking: true
+  decoding: sample
+  temperature: 1.0
+  top_p: 0.8
+  seed: 20260904
+  hf_offline: true
+  note: >
+    qwen3_5.generate 原先只看 temperature>0；task yaml 的 do_sample 不够。
+    本次 CVBENCH_DO_SAMPLE / BLINK_DO_SAMPLE 会同时把 temperature 设为 1.0。
+
+arms:
+  cv_boxed_base:
+    protocol: spatialstack / boxed last-line
+    max_new_tokens: 1024
+    output_root: logs/eval/20260905_cvbench_blink_sample/cv_boxed_base
+    results_json: logs/eval/20260905_cvbench_blink_sample/cv_boxed_base/cvbench/models__Qwen3.5-4B/20260905_022231_results.json
+    status: done
+    combined: 87.36
+    accuracy_2d: 82.88
+    accuracy_3d: 91.83
+    answered: 99.55
+    Count: 74.24
+    Relation: 94.77
+    Distance: 89.50
+    Depth: 94.17
+  cv_boxed_spar3:
+    protocol: spatialstack / boxed last-line
+    max_new_tokens: 1024
+    output_root: logs/eval/20260905_cvbench_blink_sample/cv_boxed_spar3
+    results_json: logs/eval/20260905_cvbench_blink_sample/cv_boxed_spar3/cvbench/output__20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf/20260905_025421_results.json
+    status: done
+    combined: 85.68
+    accuracy_2d: 80.94
+    accuracy_3d: 90.42
+    answered: 99.85
+    Count: 71.57
+    Relation: 94.15
+    Distance: 88.50
+    Depth: 92.33
+    delta_vs_base_sample: -1.68
+  blink_boxed_base:
+    protocol: spatialstack / boxed last-line
+    max_new_tokens: 1024
+    output_root: logs/eval/20260905_cvbench_blink_sample/blink_boxed_base
+    status: failed
+  blink_boxed_spar3:
+    protocol: spatialstack / boxed last-line
+    max_new_tokens: 1024
+    output_root: logs/eval/20260905_cvbench_blink_sample/blink_boxed_spar3
+    status: queued
+  cv_orig_base:
+    protocol: lmms_legacy / original
+    max_new_tokens: 16
+    output_root: logs/eval/20260905_cvbench_blink_sample/cv_orig_base
+    status: queued
+  cv_orig_spar3:
+    protocol: lmms_legacy / original
+    max_new_tokens: 16
+    output_root: logs/eval/20260905_cvbench_blink_sample/cv_orig_spar3
+    status: queued
+  blink_orig_base:
+    protocol: original / letter-first
+    max_new_tokens: 1024
+    output_root: logs/eval/20260905_cvbench_blink_sample/blink_orig_base
+    status: queued
+  blink_orig_spar3:
+    protocol: original / letter-first
+    max_new_tokens: 1024
+    output_root: logs/eval/20260905_cvbench_blink_sample/blink_orig_spar3
+    status: queued
+
+comparability:
+  do_not_mix:
+    - "greedy dumps (88.07/85.05, 65.99/68.92, 62.85/5.55, 75.30/13.05)"
+    - "VSI vLLM sample (different engine and task)"
+    - "boxed vs original"
+
+handoff:
+  current_phase: partial
+  last_updated: "2026-09-05T22:35:00+08:00"
+  current_task: "CV sample 已写入对照表；BLINK 待修 Dataset.copy 后续跑"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: "ISSUE-002 blink load_from_disk Dataset.copy"
+  next_action: "修 blink 加载后从 blink_boxed_base 续跑剩余 6 臂"
+
+issues:
+  - id: ISSUE-001
+    status: fixed
+    symptom: >
+      cv_boxed_base 31s 结束，status 记 rc=0，但无 results.json。日志
+      OfflineModeIsEnabled / Couldn't reach nyu-visionx/CV-Bench。
+    evidence: logs/eval/20260905_cvbench_blink_sample/cv_boxed_base/run.log
+    root_cause: >
+      驱动把 HF_DATASETS_CACHE 指到 ~/.cache/huggingface/datasets；
+      成功的 20260901 跑用的是 $PROJECT/cache/datasets。accelerate 在
+      worker 报错后仍可能返回 0，链式脚本只看 eval.sh 退出码。
+    solution: >
+      HF_DATASETS_CACHE=$PROJECT_ROOT/cache/datasets；评测结束后必须存在
+      *_results.json。失败臂目录改名为 *_offline_fail。
+    prevention: >
+      评测驱动对齐历史 dump 的 hf_datasets_cache；不要用进程退出码当分数落盘。
+  - id: ISSUE-002
+    status: open
+    symptom: >
+      blink_boxed_base 无 results.json。AttributeError: Dataset has no attribute copy。
+    evidence: logs/eval/20260905_cvbench_blink_sample/blink_boxed_base/run.log
+    root_cause: >
+      src/lmms_eval/api/task.py:1066 self.dataset_no_image = self.dataset.copy()
+      在 load_from_disk 得到 HuggingFace Dataset（非 DatasetDict）时失败。
+    solution: pending
+    prevention: pending
+
+activity_log:
+  - at: "2026-09-05T02:20:00+08:00"
+    what: >
+      启动 chain wrapper PID 3603942（node-B）。第一臂 cv_boxed_base，accelerate 8 卡 port 29610。
+  - at: "2026-09-05T02:22:00+08:00"
+    what: >
+      ISSUE-001：离线数据集路径错，空跑成功。已杀链、改 HF_DATASETS_CACHE、
+      加 results.json 闸门后重跑。
+  - at: "2026-09-05T22:35:00+08:00"
+    what: >
+      CV boxed sample 写入评测对照：87.36 / 85.68。链在 BLINK ISSUE-002 停下；
+      8 卡已释放。

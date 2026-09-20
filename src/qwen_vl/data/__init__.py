@@ -116,6 +116,20 @@ VSI_APPR_ORDER = {
     "tag": "3d"
 }
 
+# Two arms over the same 9999 MindCube questions; only the target text differs.
+# Built by scripts/mindcube/build_mindcube_sft.py.
+MINDCUBE_ANSWERONLY = {
+    "annotation_path": "data/mindcube/mindcube_train_answeronly.json",
+    "data_path": "data/mindcube/images",
+    "tag": "3d"
+}
+
+MINDCUBE_COT = {
+    "annotation_path": "data/mindcube/mindcube_train_cot.json",
+    "data_path": "data/mindcube/images",
+    "tag": "3d"
+}
+
 data_dict = {
     "cambrian_737k": CAMBRIAN_737K,
     "mp_doc": MP_DOC,
@@ -130,6 +144,8 @@ data_dict = {
     "llava_hound_64k": LLAVA_HOUND_64K,
     "vlm3r_scannet": VLM3R_SCANNET,
     "vsi_appr_order": VSI_APPR_ORDER,
+    "mindcube_answeronly": MINDCUBE_ANSWERONLY,
+    "mindcube_cot": MINDCUBE_COT,
 }
 
 

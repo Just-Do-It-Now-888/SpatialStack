@@ -1,0 +1,364 @@
+experiment_id: 20260818_qwen35base_mvopsd_v1_rollout8
+title: "MV-OPSD v1 align：整体对齐 Vision-OPD 配置（rollout.n=8 + token-mean）"
+status: running  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-18T00:30:00+08:00"
+finished_at: null
+owner: "cursor-window-mvopsd"
+
+goal: >
+  在 v1 跑完后，把训练配置**整体对齐 Vision-OPD 官方设置**（rollout.n 4→8，
+  loss_agg_mode 回到默认 token-mean），检验 CV-Bench 2D 的下降是否与「相对参考实现
+  的偏离」有关。这不是 rollout.n 的单变量消融——见 attribution，此定位为 2026-08-18
+  用户决策（选项 A）。
+  Vision-OPD 官方为 96 prompts × 8 rollouts = 768 序列/步；本实验保持 batch=64，
+  故为 64 × 8 = 512 序列/步（仍低于官方 768，但把每 prompt 的随机样本数对齐到 8）。
+
+hypothesis: >
+  v1 相对 Vision-OPD 有两处配置偏离，且两处都可能助长长散文漂移：(a) n=4 时同一
+  prompt 的 4 条轨迹更易被长散文主导，n=8 提高短答路径被采样到的概率；(b)
+  seq-mean-token-mean 让 1 条 124-token 的 spar_32view 与 1 条 342-token 的
+  spar_3view 等权，相对 token-mean 反而**抬高**了短答样本的单 token 梯度方差。
+  同时改回官方设置后，CV-Bench 2D 的下降预期减缓。若指标改善，需要后续单变量实验
+  才能拆分两者贡献（见 attribution.followup）。
+  副作用监控：clip_ratio 可能略升（更多抽签机会顶到 1024），用 wandb 跟踪。
+
+changes_vs_v1:
+  - id: rollout_n
+    what: "actor_rollout_ref.rollout.n: 4 → 8"
+    why: "对齐 Vision-OPD 官方 ROLLOUT_N=8；v1 与 v0 均为 4"
+  - id: loss_agg_mode
+    what: "actor.loss_agg_mode: seq-mean-token-mean → token-mean"
+    why: >
+      2026-08-18 改配置，回到 verl 默认与 Vision-OPD 官方设置。原先偏离的理由
+      （SPAR 3-view 吃掉 57% 梯度）基于标注答案长度，按 v1 实测 rollout 生成长度
+      重算后失衡仅 +10.8pp，前提不成立。见 LESSON-016。
+    caveat: >
+      这使本实验相对 v1 有两个变量同时变化，rollout_n 的效应不可单独归因；
+      已按 attribution（选项 A）把本实验重新定位为整体配置对齐。
+  - id: 实验名
+    what: "独立 EXPERIMENT_NAME，避免 resume_mode=auto 误续 v1 checkpoint"
+    why: "ISSUE-101 同类风险"
+
+attribution:
+  status: 已决策（选项 A，2026-08-18，用户确认）
+  problem: >
+    本实验原设计为「唯一改动 rollout.n」的受控对照，但 loss_agg_mode 改动后与 v1
+    存在两处差异，若 CV-Bench 曲线改善，无法区分是 n=8 还是 token-mean 的贡献。
+  decision: >
+    接受该混淆。两处改动方向一致（都是消除相对 Vision-OPD 官方实现的偏离），
+    因此合并为一次「整体对齐」验证更符合当前目的：先确认对齐后 CV-Bench 是否止跌，
+    再决定是否值得花算力拆分。不额外消耗算力。
+  interpretation_rule: >
+    本实验结论只能表述为「整体对齐官方配置后 CV-Bench 的变化」，
+    **不得**表述为「rollout.n=8 带来 X 点提升」或「token-mean 带来 X 点提升」。
+    报告与 README 引用时须保留这一限定。
+  followup: >
+    仅在本实验相对 v1 有明确改善时才值得拆分；届时用 rollout.n=4 + token-mean
+    单条实验即可分离出 loss_agg_mode 的贡献（与本实验相减得 rollout.n 的贡献）。
+    若无改善则两个因素都可排除，无需拆分。
+
+relations:
+  follows: 20260817_qwen35base_mvopsd_v1
+  inherits: >
+    除 rollout.n、loss_agg_mode 与 test_freq/save_freq 外与 v1 相同：数据、seed、
+    frozen teacher、batch=64、300 步。test_freq=15（v1 首轮为 5）。
+  contrasts:
+    v1: "64 × 4 = 256 序列/步；loss_agg_mode=seq-mean-token-mean"
+    this: "64 × 8 = 512 序列/步；loss_agg_mode=token-mean"
+    vision_opd_official: "96 × 8 = 768 序列/步；loss_agg_mode=token-mean"
+    note: >
+      本实验与官方仍有 batch 差异（64 vs 96），故为「对齐」而非「复现」。
+
+code:
+  git_commit: "同 v1（b6eeb00 + 未提交改动）"
+  git_dirty: true
+  key_files:
+    - scripts/opsd/run_mvopsd.sh              # ROLLOUT_N 环境变量
+    - verl_pkg/verl/trainer/config/mvopsd.yaml
+
+environment:
+  train_env: "系统 python3.12 + ~/.local user site"
+  node: "node-B / dsw-455361-5459dbbfc9-gp4s6（内网 22.36.104.74）"
+  node_note: >
+    2026-08-18 起本实验不在 node-A（跑 v1 的机器）上排队，改在 node-B 与 v1 并行。
+    node-B 的代码、环境（~/.local 11G + conda sr_opsd 18G）、基座权重与全量数据集
+    均由 node-A 经 pod 内网 rsync 直传，项目路径与家目录一致，`verl` editable 安装
+    原地生效。node-B 未同步 `checkpoints/`，故必为冷启动，不存在误 resume v1 的风险。
+    两机同为 8×H20 / 驱动 570.133.20 / torch 2.10.0+cu128，硬件与软件栈可比。
+  nodes: 1
+  gpus_per_node: 8
+  gpu_type: "95 GiB / 卡"
+  notes: >
+    v1 step 65 时 actor max_memory_allocated ≈ 60.4 GiB（n=4）。
+    n=8 每步 rollout 序列翻倍，正式跑前必须先做 SMOKE 验证显存与墙钟；
+    若 OOM，备选为 ROLLOUT_N=6 或略降 gpu_memory_utilization（当前 0.35）。
+
+model:
+  backbone: "Qwen3.5-4B"
+  model_path: "./models/Qwen3.5-4B"
+  model_note: "冷启动，不从 v1 checkpoint 续训（对照实验）"
+
+data:
+  dataset_version: "mvopsd-v0 (seed 20260816)"
+  note: "与 v1 相同 parquet"
+  artifacts:
+    train_main: "data/mvopsd/parquet/main_train.parquet"
+    # 与 v1 同一份 native 排版；复现需 --prompt-style native 重建。
+    val_cvbench: "native 排版（已删除；见 build_cvbench_val_parquet.py --prompt-style native）"
+
+training:
+  status: completed
+  node: node-B（dsw-455361-5459dbbfc9-gp4s6）
+  entrypoint: scripts/opsd/run_mvopsd.sh
+  command: >
+    ROLLOUT_N=8 EXPERIMENT_NAME=20260818_qwen35base_mvopsd_v1_rollout8_main
+    scripts/opsd/run_mvopsd.sh main
+  command_note: >
+    TEST_FREQ 未显式指定，取脚本默认 15，SAVE_FREQ 随之对齐为 15（启动日志已确认
+    "checkpoint=aligned with eval (every 15 steps)"）。
+  started_at: "2026-08-18T03:12:22+08:00"
+  smoke:
+    at: "2026-08-18T02:50:03+08:00"
+    config: >
+      **不用 SMOKE=1**（见 ISSUE-102：该开关会把 n 硬压成 2）。改为逐项传环境变量：
+      2 步 / batch 64（真实值，非 SMOKE 的 8）/ n=8 / TEST_FREQ=1 / SAVE_FREQ=-1 /
+      64 条 val / judge 开 / resume_mode=disable。
+      batch 用真实值是为了让显存与墙钟对正式跑有参考价值。
+    result: >
+      通过。0 次 OOM、0 个 traceback，wandb run summary 正常同步
+      （run l2wy1n13）。64 条子集 combined 0.9375（step 0/1）→ 0.953125（step 2），
+      answered/frac 全程 1.0；judge/pending 与 woken 均为 0（规则层读完全部行）；
+      pg_loss = vopd_loss = 0.042，grpo_loss 与 kl_loss 均为 0，
+      policy_fallback_fraction 恒 0 → 走的是纯 vopd 分支。
+    verifications:
+      teacher_frozen: >
+        self_distillation/teacher_probe 在 step 1 与 step 2 完全相同
+        （0.04456961154937744，与 v1 smoke 的取值一致，符合「teacher 停在同一份
+        基座权重」的预期）。
+      memory_at_n8: >
+        **本次 smoke 的主要目的，结论是显存担忧不成立。**
+        max_memory_allocated 56.0 → 59.6 GB，reserved 64.3 → 67.9 GB，95 GB 卡余量充足。
+        对比 v1 在 n=4 时的约 60.4 GB，n=8 几乎没有增加——因为
+        ppo_micro_batch_size_per_gpu=1 且 use_dynamic_bsz=False，峰值由微批而非 n 决定；
+        n 翻倍只增加微批个数（墙钟），不抬高峰值。
+        因此 environment.notes 里「若 OOM 则退到 ROLLOUT_N=6」的备选方案无需启用。
+      wall_clock: >
+        稳态 timing_s/step ≈ 172.6 s（step 1 的 478 s 含预热），timing_s/gen ≈ 32.7 s。
+        n=4 的 v1 折算约 124 s/步，故 n=8 的代价是约 1.4 倍而非 2 倍。
+        300 步纯训练约 14.4 h，加 21 次全量 CV-Bench 评测与 20 次存档，预计 16-18 h。
+      response_length: >
+        mean ≈ 280 tokens，clip_ratio 3.1%。需在正式跑里对照 v1 的同期值，
+        验证 hypothesis 里「n=8 使 clip_ratio 略升」的副作用预期。
+    artifacts: "checkpoints|rollouts|logs 下的 20260818_qwen35base_mvopsd_v1_rollout8_main_smoke"
+  parameters:
+    seed: 20260816
+    learning_rate: 2.0e-6
+    total_batch_size: 64
+    rollout_n: 8               # 相对 v1 改动之一
+    sequences_per_step: 512      # 64 × 8
+    loss_agg_mode: token-mean    # 相对 v1 改动之二（mvopsd.yaml 已改，无需 CLI 覆盖）
+    total_training_steps: 300
+    max_prompt_length: 4096
+    max_response_length: 1024
+    loss_mode: vopd
+    teacher_regularization: frozen
+    test_freq: 15
+    save_freq: 15              # 与 test_freq 对齐（run_mvopsd.sh 默认 SAVE_FREQ=TEST_FREQ）
+    val_before_train: true
+    resume_mode: auto            # 目录为空 → 冷启动
+  in_training_eval:
+    benchmark: "CV-Bench 全量 2,638 条"
+    compare_to: "20260817_qwen35base_mvopsd_v1_main 同 step 的 combined / 2d / 3d / answered/frac"
+    cross_node_baseline_offset:
+      measured_at: "2026-08-18T03:22:00+08:00"
+      finding: >
+        **跨机对照存在约 +0.25 分的基线偏移，比较时必须扣掉。**
+        同一份基座 Qwen3.5-4B、同一个 2,638 条 val、同样贪心解码，
+        step 0 在两台机器上的 combined 不同：
+        node-A（v1）0.869629463365812（86.96），node-B（本实验）0.8721077414068863（87.21）。
+      per_task:
+        ADE20K/Count: "216/342 → 216/342（完全相同）"
+        ADE20K/Relation: "270/291 → 271/291（+1）"
+        COCO/Count: "362/446 → 361/446（-1）"
+        COCO/Relation: "347/359 → 348/359（+1）"
+        Omni3D/Depth: "573/600 → 577/600（+4）"
+        Omni3D/Distance: "525/600 → 526/600（+1）"
+        net: "净 +6 行 / 2,638 = +0.23pp；另有 answered/frac 0.9992 → 1.0（2 行未判读变 0 行）"
+      cause: >
+        贪心解码在不同 kernel 与批次调度下的正常抖动，不是环境搬迁缺陷：
+        差异方向正负都有（Count 降、Relation 与 3D 升），不是系统性偏移；
+        两机 CUDA 兼容层不同（node-A 的 nvidia-smi 报 13.0，node-B 报 12.8，
+        驱动同为 570.133.20，torch 同为 2.10.0+cu128），
+        且 vLLM 的批次调度本身不保证跨 run 逐位一致。
+      interpretation_rule: >
+        rollout8 与 v1 的 CV-Bench 差异**小于约 0.3 分时不可归因于配置改动**，
+        那个量级已经落在跨机噪声里。要判断「对齐官方配置后 CV-Bench 是否止跌」，
+        应看曲线**斜率与趋势**，而不是单点绝对值之差；
+        或用各自的 step 0 做基线归一化后再比。
+        v0 曾出现 step 50 = 76.50 / step 300 = 72.19 这种十几分的跌幅，
+        相对本偏移足够大，趋势判断不受影响。
+    watch:
+      - "response_length/clip_ratio（n=8 可能略高于 v1）"
+      - "data/step/source/*/response_length/mean"
+      - "val-core/cvbench/combined/acc"
+      - "val-core/cvbench/answered/frac"
+      - "分源 loss：token-mean 下 spar_3view 梯度占比应约 38%、spar_32view 约 8%（LESSON-016 实测值），偏离说明聚合模式未生效"
+  artifacts:
+    output_dir: "checkpoints/20260818_qwen35base_mvopsd_v1_rollout8_main"
+    train_log: "logs/train/20260818_qwen35base_mvopsd_v1_rollout8_main/"
+    rollouts: "rollouts/20260818_qwen35base_mvopsd_v1_rollout8_main"
+    validation_dumps: "logs/val/20260818_qwen35base_mvopsd_v1_rollout8_main"
+    wandb: "slcheng/MV-OPSD run 20260818_qwen35base_mvopsd_v1_rollout8_main"
+  results:
+    measured_at: "2026-08-21"
+    source: >
+      解析 logs/train/20260818_qwen35base_mvopsd_v1_rollout8_main/train_*.log
+      （node-B，经 ssh opsd2 取回）。口径与 lr_batch_sweep 的 results 一致。
+    metrics:
+      step0: 87.21
+      trough: "77.75 @ step 30"
+      best: "83.15 @ step 255"
+      step300: 82.62
+      tail_mean_last5: 82.59
+      delta_vs_step0: -4.62
+      jsd_plateau: 0.0155
+      grad_norm_steady: 0.42
+      median_step_seconds: 182.8
+      max_memory_allocated_gb: 59.6
+      completed_steps: 300
+    v1_contrast:
+      note: >
+        v1 在 node-A、native 题面，故只比各自相对 step 0 的 delta，且需扣掉
+        +0.25 的跨机基线偏移；差异小于约 0.3pp 不得归因于配置。
+      v1_delta_vs_step0: -3.33     # step0 86.96 → 末 5 点均值 83.63
+      this_delta_vs_step0: -4.62
+      jsd_plateau: "v1 0.0157（seq-mean-token-mean）vs 本实验 0.0155（token-mean）"
+      wall_clock: "v1 中位 95.2 s/步 vs 本实验 182.8 s/步，即 1.9x"
+    summary: >
+      **整体对齐 Vision-OPD 配置（n=8 + token-mean）没有让 CV-Bench 止跌。**
+      相对自身 step 0 的渐近落差为 −4.62pp，未优于 v1 的 −3.33pp（差 1.3pp，
+      已超过 0.3pp 的跨机噪声阈）；JSD 平台 0.0155 与 v1 的 0.0157 相同。
+      代价方面：峰值显存几乎不变（59.6 vs 60.4 GB，因 ppo_micro_batch_size_per_gpu=1，
+      峰值由微批而非 n 决定），但墙钟为 1.9x。
+      按 attribution.interpretation_rule，本结论只能表述为「对齐官方配置后无改善」，
+      不得拆到 rollout.n 或 loss_agg_mode 任一项；同时按 attribution.followup，
+      既然没有改善，两个因素都可排除，**不需要再花算力做拆分实验**。
+      工程决策：后续实验一律用 rollout.n=4。
+    failure_reason: ""
+
+evaluation:
+  status: planned
+  note: "训练内 CV-Bench 为主；跑完后可用 eval_visionopd 对 step 50/300 做离线对照"
+
+handoff:
+  current_phase: analysis
+  last_updated: "2026-08-18T20:15:00+08:00"
+  current_task: "训练已完成 300/300；结论待写入 metrics/conclusion 与报告"
+  owner: "cursor-window-mvopsd（从 node-A 经 `ssh opsd2` 操作）"
+  active_job_id: "无（已结束；原 node-B PID 565189，2026-08-18 19:46 正常退出）"
+  resources: "node-B 8 卡已释放（显存 0 MiB，无残留进程）；node-A 8 卡同为空闲"
+  blocker: ""
+  next_action: >
+    从 wandb 取满 300 步曲线，对照 v1 同 step 的 val-core/cvbench/combined/acc 与
+    answered/frac（注意 +0.25 的跨机基线偏移，差异小于约 0.3 分不得归因于配置改动），
+    填入本文件的 metrics/conclusion 与 reports/MV-OPSD_实验报告.md。
+    另按 ISSUE-102 的 deferred_fix 修 run_mvopsd.sh:58（v1 与本实验均已结束，
+    可安全改动并同步两机）。
+    注意：复现本实验的训练内 CV-Bench 必须
+    VAL_FILE=data/eval/cvbench_verl/cvbench_val_native.parquet，
+    因为默认路径已于 2026-08-18 20:11 重建为 lmms_eval 排版。
+
+issues:
+  - id: ISSUE-102
+    status: open  # 已用等效命令绕过；脚本修复待 v1 结束后进行
+    phase: smoke
+    discovered_at: "2026-08-18T02:48:00+08:00"
+    symptom: >
+      本 registry 与 ACTIVE.md 记录的 smoke 命令
+      `SMOKE=1 ROLLOUT_N=8 ... run_mvopsd.sh main` 并不会以 n=8 运行，
+      而是以 n=2 运行。照此执行会得到「smoke 通过」的结论，但完全没有验证
+      本实验唯一需要验证的东西（n=8 的显存与墙钟）。
+    evidence: >
+      run_mvopsd.sh:58 在 SMOKE 分支内是硬赋值 `ROLLOUT_N=2`，
+      不是 `ROLLOUT_N="${ROLLOUT_N:-2}"`，会无条件覆盖第 30 行从环境读到的值。
+      同一分支的 TRAIN_BATCH_SIZE 用的是 `${SMOKE_BATCH:-8}`（可覆盖），
+      对比之下更能看出 ROLLOUT_N 这行是漏写。
+    root_cause: >
+      SMOKE 分支设计意图是「一切都缩到最小」，加 ROLLOUT_N=8 这种需求出现得晚，
+      写 registry 时按 TRAIN_BATCH_SIZE 的可覆盖语义想当然地推断了 ROLLOUT_N。
+    solution: >
+      本次不改脚本，改为不用 SMOKE=1，直接逐项传脚本本就支持的环境变量：
+      `EXPERIMENT_NAME=..._smoke ROLLOUT_N=8 TOTAL_STEPS=2 TRAIN_BATCH_SIZE=64
+      TEST_FREQ=1 SAVE_FREQ=-1 VAL_FILE=<cvbench_val_64.parquet>
+      run_mvopsd.sh main trainer.resume_mode=disable`。
+      顺带把 batch 设为真实的 64（SMOKE 分支会压到 8），使显存与墙钟数据对
+      正式跑有参考价值。
+    deferred_fix: >
+      不在此刻改 run_mvopsd.sh：node-A 上 v1 的 `bash run_mvopsd.sh` 进程仍在运行，
+      bash 是按文件偏移分块读脚本的，改动会移动偏移量，进程在当前命令返回后可能
+      读到错位内容。等 v1 结束后再把第 58 行改成可覆盖形式并同步两机。
+    prevention: >
+      registry 里写具体启动命令时，凡是声称「某参数取值 X」的，要回到脚本确认该参数
+      在所走分支里确实可被覆盖，而不是从同分支其他参数的写法类推。
+
+activity_log:
+  - at: "2026-08-18T20:15:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "订正训练状态为已完成；重建训练内 val parquet 以对齐 lmms_eval 题面排版"
+    result: >
+      核查实际进程与产物：node-B 无 run_mvopsd / main_ppo 残留、8 卡显存 0 MiB，
+      latest_checkpointed_iteration.txt = 300，训练日志尾部为 vLLM 正常 shutdown
+      （2026-08-18 19:46）。此前 ACTIVE.md 与本文件标为「运行中」，已一并订正。
+      两个实验都已结束、无进程占用 val parquet 后，用
+      `python3 scripts/opsd/build_cvbench_val_parquet.py`（默认 --prompt-style lmms_eval）
+      重建 cvbench_val.parquet 与 cvbench_val_64.parquet，消除报告 §4.3.3 记录的
+      最后一处题面排版差（`(A) 3` → `A. 3`，并去掉 "Select from the following choices."）。
+      本实验与 v1 实际使用的 native 版按原字节保留为 cvbench_val_native.parquet
+      （md5 c08f38b6afa6c4c93f8d4ee17b3423d2），故两条曲线仍可复现。
+      重建只改题面文本：data_source / 行序 / index / ground_truth / 图片路径 /
+      min_pixels / max_pixels 与旧文件逐条一致，2,638 张 PNG 一张未改写。
+      回归测试 test_cvbench_val_parity.py 第 6 项与 test_lmms_cvbench_protocol.py
+      第 3 项由软提示转为真断言并通过（2638/2638 逐条匹配）；
+      test_validation_judge / test_sample_provenance / test_mvopsd_data 复跑全绿。
+      附带查明旧的 64 条冒烟文件并非 native 排版而是多一个 `<image>` 后换行符，
+      即作废的 76.09 所用「旧 val prompt」，已改名 cvbench_val_64_pre_promptstyle.parquet。
+  - at: "2026-08-18T00:30:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "登记 rollout_n=8 对照实验，排队在 v1 之后"
+    result: >
+      用户确认可在当前 v1 跑完后接续。除 rollout.n 外配置与 v1 一致；
+      独立实验名防 resume 污染。
+  - at: "2026-08-18T01:35:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "loss_agg_mode 改为 token-mean，本实验重新定位为「整体对齐 Vision-OPD」"
+    result: >
+      实测 v1 的 23,552 条 rollout 后发现，计划 §6.5.1 主张偏离默认聚合模式的依据
+      （SPAR 3-view 吃 57.2% 梯度、vlm3r_scannet 仅 0.9%）用的是标注答案长度，
+      而蒸馏 loss 只作用于 student 生成的 token；按实际生成长度重算，最大偏移仅
+      +10.8pp 且 vlm3r_scannet 实为 25.5%。已将 mvopsd.yaml 改回 verl 默认
+      token-mean（LESSON-016）。该改动使本实验相对 v1 有两处差异，用户选择方案 A：
+      接受混淆，定位为整体配置对齐而非 rollout.n 单变量消融，结论表述受
+      attribution.interpretation_rule 约束。
+  - at: "2026-08-18T02:45:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "改在 node-B 与 v1 并行，取消「等 v1 结束」的排队约束"
+    result: >
+      用户要求两台机器并行以加快进度。已从 node-A 经 pod 内网直传代码、`.git`、
+      环境与全量数据集到 node-B（DSW 的 SSH 网关 60.205.212.164:1000 不接受容器内
+      发起的连接，改走 pod IP 22 端口，rsync 实测 600 MB/s）。node-B 环境自检通过：
+      torch 2.10.0+cu128、8 卡可见、verl 从项目内 verl_pkg 正确解析、wandb 凭据就位。
+      未同步 checkpoints/，冷启动语义不变，实验设计与 v1 的可比性不受影响。
+  - at: "2026-08-18T03:12:22+08:00"
+    actor: cursor-window-mvopsd
+    action: "smoke 通过后在 node-B 启动正式 300 步"
+    result: >
+      前置检查三项通过：checkpoints/20260818_qwen35base_mvopsd_v1_rollout8_main 为空
+      （冷启动）、8 卡 0 MiB、无残留训练或 judge 进程。
+      启动日志确认 steps=300 batch=64 rollout_n=8 save_freq=15、
+      评测用全量 2,638 条 cvbench_val.parquet、checkpoint 与评测对齐。
+      smoke 已排除 n=8 的显存风险（59.6 GB / 95 GB），预计 16-18 h 跑完。
+
+notes:
+  conclusion: ""
+  next_step: "v1 完成后执行 smoke，再正式启动"

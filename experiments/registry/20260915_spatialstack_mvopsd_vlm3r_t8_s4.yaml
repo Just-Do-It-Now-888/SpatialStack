@@ -1,0 +1,265 @@
+experiment_id: 20260915_spatialstack_mvopsd_vlm3r_t8_s4
+title: "SpatialStack VLM-3R MV-OPSD：Teacher 8 / Student 4（必含关键帧）"
+status: eval_complete_blink_missing
+
+created_at: "2026-09-15T20:29:00+08:00"
+started_at: "2026-09-16T13:36:01+08:00"
+driver_pid: 3767293
+train_pgid: 3767240
+train_log: logs/train/20260915_spatialstack_mvopsd_vlm3r_t8_s4/train_20260916_133601.log
+finished_at: "2026-09-16T23:28:11+08:00"
+owner: cursor-window-spatialstack
+
+goal: >
+  在 node-C 上用 SpatialStack geo 权重、仅 vlm3r_scannet 跑 1 epoch MV-OPSD。
+  Teacher 看满 8 帧，Student 看 4 帧且必含 oracle 关键帧。正式训练 wandb online。
+
+hypothesis: >
+  与 SPAR T32/S16 同协议换源：钉住关键帧后 8→4 仍保留特权间隙。只相对本臂 step 0；
+  不可与 20260826 基座 vlm3r 或 SPAR T32 曲线并列相减。
+
+relations:
+  init_from: 20260909_spatialstack_qwen35_geo
+  protocol_copy: 20260915_spatialstack_mvopsd_spar_t32_s16
+  engine: hf_generate
+  node: node-C
+
+environment:
+  conda_env: sr_opsd
+  nodes: [node-C]
+  gpus_per_node: 8
+  gpu_type: H20
+  ssh: "nodec / opsd3 as root; HOME=/home/c30084464"
+
+model:
+  backbone: Qwen3.5-4B + VGGT geometry fusion
+  model_path: output/spatialstack_qwen35_train
+  geometry_encoder: VGGT-1B
+  teacher: frozen
+  thinking: false
+
+design:
+  data_sources: [vlm3r_scannet]
+  view_budget:
+    teacher: 8
+    student: 4
+    student_rule: required_views union farthest-point extras; empty required pins frame 0
+    skip_if_n_le_4: true
+    skip_if_keys_gt_4: true
+  source_plan: data/mvopsd/plan_single_vlm3r_scannet/
+  builder: scripts/opsd/build_vlm3r_t8_s4_plans.py
+  parquet: data/mvopsd/parquet_vlm3r_t8_s4/main_train.parquet
+  train_rows: 30493
+  holdout_rows: 500
+  total_steps: 635   # floor(30493 / 48)
+  train_batch_size: 48
+  test_freq: 50
+  save_freq: 50
+  max_actor_ckpt_to_keep: 3
+  epochs: 1.0
+  shared_protocol:
+    - "ROLLOUT_NAME=hf"
+    - "lr 2e-6 / batch 48 / rollout.n=1 / frozen teacher"
+    - "teacher_enable_thinking=False"
+    - "VAL_FILE=vsibench_val_boxed_lastline_sub480.parquet"
+    - "VAL_DO_SAMPLE=0 greedy (rerun 2026-09-16)"
+    - "JUDGE=0"
+    - "WANDB_MODE=online project=MV-OPSD"
+    - "SMOKE=1 first then formal"
+
+wandb:
+  mode: online
+  project: MV-OPSD
+  run_name: 20260915_spatialstack_mvopsd_vlm3r_t8_s4
+  url: https://wandb.ai/slcheng/MV-OPSD/runs/xahjebxl
+  run_id: xahjebxl
+  prior_sample_run: https://wandb.ai/slcheng/MV-OPSD/runs/7f7w3nfl
+  smoke_mode: offline_greedy_20260916
+
+read_rules:
+  - "只相对本臂 step 0"
+  - "离线评测口径：lastline（SPAR 措辞，无 \\boxed{}）；不可与 geo boxed 66.59 对减"
+  - "不可与 20260826 基座 vlm3r 或 SPAR T32/S16 并列相减"
+
+training:
+  status: completed
+  entrypoint: scripts/opsd/launch_spatialstack_vlm3r_t8_s4.sh
+  command: >
+    setsid nohup env HOME=/home/c30084464 TOTAL_STEPS=635
+    bash scripts/opsd/launch_spatialstack_vlm3r_t8_s4.sh
+  parameters:
+    seed: 20260915
+    learning_rate: 2.0e-6
+    total_batch_size: 48
+    total_steps: 635
+    epochs: 1.0
+    rollout_name: hf
+  artifacts:
+    output_dir: checkpoints/20260915_spatialstack_mvopsd_vlm3r_t8_s4
+    checkpoint: checkpoints/20260915_spatialstack_mvopsd_vlm3r_t8_s4/global_step_635
+    train_log: logs/train/20260915_spatialstack_mvopsd_vlm3r_t8_s4/train_20260916_133601.log
+    sample_run_ckpt: checkpoints/20260915_spatialstack_mvopsd_vlm3r_t8_s4_valsample_20260916
+    nohup_log: logs/train/20260915_spatialstack_mvopsd_vlm3r_t8_s4/train.nohup.log
+    smoke_log: logs/train/20260915_spatialstack_mvopsd_vlm3r_t8_s4_smoke/train_20260915_203630.log
+  results:
+    metrics:
+      smoke_global_step: 2
+      smoke_k_views_student: 4
+      smoke_n_views_teacher: 8
+      smoke_policy_fallback_fraction: 0.0
+      smoke_teacher_image_swap_fraction: 1.0
+      smoke_teacher_probe: 0.08568
+      smoke_vopd_loss: 0.0365
+      inloop_sub480_step0: 0.6159
+      inloop_sub480_step635: 0.5828
+    summary: >
+      1 epoch 635 步已完成（06:59 UTC+8）。训练内 sample sub480：step0 61.59% →
+      终步 58.28%，不可对 geo 66.59。
+    failure_reason: ""
+
+evaluation:
+  status: complete_except_blink
+  finished_at: "2026-09-17T12:26:11+08:00"
+  entrypoint: scripts/opsd/eval_vlm3r_t8_s4_last3_then_benches.sh
+  command: |
+    setsid nohup env HOME=/home/c30084464
+      bash scripts/opsd/eval_vlm3r_t8_s4_last3_then_benches.sh
+  benchmarks: [vsibench, cvbench, blink_spatial, sparbench]
+  parameters:
+    in_loop: vsibench_val_boxed_lastline_sub480.parquet greedy
+    offline: vsibench 5130 lastline @4096 steps 550/600/635; best then cv/blink_spatial/spar lastline
+    conda_env: sr_opsd
+    blink: 3-task spatial only
+  artifacts:
+    eval_root: logs/eval/20260915_spatialstack_mvopsd_vlm3r_t8_s4
+    chain_log: logs/eval/20260915_spatialstack_mvopsd_vlm3r_t8_s4/last3_then_benches.nohup.log
+    best_ckpt: logs/eval/20260915_spatialstack_mvopsd_vlm3r_t8_s4/best_ckpt.txt
+    vsi_last3: logs/eval/20260915_spatialstack_mvopsd_vlm3r_t8_s4/vsi_last3_scores.txt
+  results:
+    metrics:
+      vsibench_lastline_n: 5130
+      vsibench_lastline_answered: 100.0
+      vsibench_lastline_step550: 63.55
+      vsibench_lastline_step600: 63.58
+      vsibench_lastline_step635: 64.02
+      best_step: 635
+      cvbench_lastline: 82.40
+      cvbench_n: 2638
+      sparbench_lastline: 66.17
+      sparbench_n: 7211
+      blink_spatial: null
+    summary: >
+      last3 VSI lastline @4096 选 step 635（64.02）。同权重 CV lastline 82.40、
+      SPAR lastline 66.17。BLINK-Spatial 未出分。不可对 geo boxed。
+    failure_reason: "BLINK_PROTOCOL=lastline unknown on node-C at eval time"
+
+handoff:
+  current_phase: eval_recorded
+  last_updated: "2026-09-18T10:50:00+08:00"
+  current_task: "none; optional BLINK-Spatial lastline rerun on node-C after syncing blink/utils.py"
+  owner: cursor-window-spatialstack
+  active_job_id: ""
+  resources: "node-C 8×H20 idle"
+  blocker: ""
+  next_action: >
+    需要 BLINK 时先把 A 上已含 lastline 的 blink/utils.py 同步到 C，再只补跑 blink_spatial。
+    lastline 数字不可与 geo boxed 66.59/86.06/68.86 并列。
+
+issues:
+  - id: ISSUE-001
+    status: resolved
+    phase: training
+    discovered_at: "2026-09-15T20:50:00+08:00"
+    symptom: "node-C 以 root SSH 启动时 wandb online 找不到凭证"
+    evidence: >
+      首次正式启动 train.nohup.log：wandb is set to online but no credentials were found。
+      /home/c30084464/.netrc 在 C 上原先不存在；拷贝后 netrc 因 owner 不是 root 被拒绝。
+    root_cause: >
+      node-C 家目录不是 node-A 的 live NFS；root 的 HOME 指向 /home/c30084464 时
+      Python netrc 安全检查要求文件属主与当前用户一致。
+    solution: >
+      将凭证放到 /root/.netrc（600）；launch 脚本在 WANDB_API_KEY 为空时从
+      /root/.netrc 读取 api.wandb.ai 密码并 export。
+    prevention: "LESSON-042：node-C root 训练显式 HOME=/home/c30084464 且 wandb 走 /root/.netrc 或 WANDB_API_KEY"
+  - id: ISSUE-002
+    status: mitigated
+    phase: smoke
+    discovered_at: "2026-09-15T20:49:00+08:00"
+    symptom: "SMOKE 两步完成后 wandb offline teardown BrokenPipeError"
+    evidence: "smoke log 有 training/global_step:2；进程已退出；GPU 回 0 MiB"
+    root_cause: "offline wandb 收尾管道断开，不阻断闸门"
+    solution: "确认 step=2 与闸门后改 WANDB_MODE=online 正式训"
+    prevention: "冒烟以 checkpoint/global_step 与闸门指标为准，不把 wandb teardown 当训练失败"
+  - id: ISSUE-003
+    status: resolved
+    phase: evaluation
+    discovered_at: "2026-09-16T06:59:56+08:00"
+    symptom: "训完 chain_after merge 失败，全集 boxed 未启动；C 卡空闲"
+    evidence: >
+      chain_after.nohup.log：ModuleNotFoundError: No module named 'ray'。
+      merge_mvopsd_ckpt.sh 默认 PYTHON_MERGE=/usr/bin/python3。
+    root_cause: "eval_after 未 activate sr_opsd，也未覆盖 PYTHON_MERGE"
+    solution: "PYTHON_MERGE 指向 sr_opsd python；eval_after 先 conda activate sr_opsd。greedy 重跑后的 chain_after 走新路径。"
+    prevention: "merge/eval 入口强制 conda sr_opsd，不要用系统 python"
+  - id: ISSUE-004
+    status: resolved
+    phase: evaluation
+    discovered_at: "2026-09-17T09:02:35+08:00"
+    symptom: "lastline VSI 启动即 LocalEntryNotFoundError"
+    evidence: >
+      last3_then_benches.log：Cannot find cached snapshot for nyu-visionx/VSI-Bench
+      and outgoing traffic has been disabled (HF_HUB_OFFLINE=1)。
+    root_cause: "C 上已有 vsibench 视频与 datasets arrow，但缺少 hub 目录 datasets--nyu-visionx--VSI-Bench"
+    solution: "从 A rsync hub snapshots（VSI/CV/BLINK/SPAR）后重跑 lastline"
+    prevention: "HF_HUB_OFFLINE=1 前核对 hub/datasets--* 快照，不只 rsync 视频目录"
+  - id: ISSUE-005
+    status: open
+    phase: evaluation
+    discovered_at: "2026-09-17T12:03:43+08:00"
+    symptom: "BLINK-Spatial 启动失败，目录为空"
+    evidence: >
+      last3_then_benches.log：ValueError unknown BLINK_PROTOCOL 'lastline';
+      expected one of ('original', 'spatialstack')。随后 SPAR 仍跑完，脚本标 DONE。
+    root_cause: >
+      node-C 家目录非 live NFS；评测时 C 上 blink/utils.py 尚无 lastline。
+      node-A 后来已加入 lastline。
+    solution: "未补跑。若要分数：同步 utils 后只跑 blink_spatial。"
+    prevention: "跨机评测前核对 C 上 BLINK_PROTOCOLS / CV / SPAR 协议集合"
+
+activity_log:
+  - at: "2026-09-15T20:29:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "created registry for VLM-3R T8/S4 SpatialStack MV-OPSD"
+    result: "status=planned"
+  - at: "2026-09-15T20:49:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "SMOKE=1 two steps on node-C (wandb offline)"
+    result: "gates passed; global_step=2; GPUs released"
+  - at: "2026-09-15T20:58:11+08:00"
+    actor: cursor-window-spatialstack
+    action: "formal 635-step train WANDB online on node-C"
+    result: "PID 2077762 PGID 2077707 wandb 7f7w3nfl"
+  - at: "2026-09-15T21:01:55+08:00"
+    actor: cursor-window-spatialstack
+    action: "chain_after 2077762 40000 eval_after_vlm3r_t8_s4.sh"
+    result: "eval_queue_pid 2099994"
+  - at: "2026-09-16T06:59:56+08:00"
+    actor: cursor-window-spatialstack
+    action: "train finished 635 steps; chain_after merge failed (no ray)"
+    result: "eval_blocked; GPUs idle"
+  - at: "2026-09-16T13:36:01+08:00"
+    actor: cursor-window-spatialstack
+    action: "greedy val rerun after user stop; SMOKE then 635-step formal"
+    result: "PID 3767293 wandb xahjebxl; sample ckpt archived"
+  - at: "2026-09-17T09:01:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "stop boxed last3 eval; relaunch lastline VSI then lastline CV/BLINK/SPAR"
+    result: "eval_pid 1390889 on node-C sr_opsd lastline"
+  - at: "2026-09-17T12:26:11+08:00"
+    actor: node-C
+    action: "last3_then_benches finished"
+    result: "VSI 64.02@635; CV 82.40; SPAR 66.17; BLINK failed lastline protocol"
+  - at: "2026-09-18T10:50:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "read node-C eval artifacts after SSH restored"
+    result: "registry/ACTIVE updated; GPUs idle"

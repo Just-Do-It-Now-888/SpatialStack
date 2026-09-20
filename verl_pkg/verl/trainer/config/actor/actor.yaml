@@ -142,6 +142,10 @@ self_distillation:
   # Optional dataset column used as teacher-side images for multimodal distillation
   teacher_image_key: null
 
+  # Overrides data.apply_chat_template_kwargs.enable_thinking for the teacher prompt only.
+  # null inherits the student's setting, which is the behaviour before this knob existed.
+  teacher_enable_thinking: null
+
   # Teacher prompt mode: null for SDPO (image swap), "answer_hint" for OPSD (text hint)
   teacher_prompt_mode: null
 

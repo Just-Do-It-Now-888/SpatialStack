@@ -1,0 +1,70 @@
+experiment_id: 20260825_token_budget_judge_extract
+title: "Token 预算对照：同 vLLM + judge-extract，仅改 max_tokens（1024 vs 4096）"
+status: running
+
+created_at: "2026-08-25T01:40:00+08:00"
+finished_at: null
+owner: cursor-window-mvopsd
+node: node-A
+
+goal: >
+  在基座与 llava_hound step 100 上，固定 vLLM spatialstack 协议与 judge-extract 严判，
+  仅改变 max_tokens（1024 vs 4096），检验「放宽生成长度预算是否在 judge 主口径下仍无效」。
+
+hypothesis: >
+  H0：退化主要由截断导致，4096 下 judge-extract 分数与 answered_pct 应显著上升。
+  H1：失效为重复退化，4096 只降低截断率、不改变 judge 分数与 answered_pct。
+
+design:
+  fixed:
+    harness: vLLM 0.18 TP=8
+    protocol: spatialstack
+    frames: 32
+    decoding: greedy
+    scoring: judge_extract_strict_v1（全行送判）
+    judge: models/gpt-oss-120b
+  arms:
+    - arm_id: base_tok1024
+      model: models/Qwen3.5-4B
+      max_tokens: 1024
+      max_model_len: 12288
+      status: running
+      out_dir: logs/eval/token_budget_judge/base_tok1024
+    - arm_id: base_tok4096
+      model: models/Qwen3.5-4B
+      max_tokens: 4096
+      max_model_len: 16384
+      status: completed_archive
+      source: logs/eval/decoding_ab/base_greedy/judge_extract/summary.json
+      judge_overall: 53.05707835977898
+    - arm_id: step100_tok1024
+      model: output/20260821_mvopsd_single_llava_hound_main_global_step_100_hf
+      max_tokens: 1024
+      max_model_len: 12288
+      status: queued
+      out_dir: logs/eval/token_budget_judge/step100_tok1024
+    - arm_id: step100_tok4096
+      model: output/20260821_mvopsd_single_llava_hound_main_global_step_100_hf
+      max_tokens: 4096
+      max_model_len: 16384
+      status: completed_archive
+      source: logs/vsi_train_eval/20260821_mvopsd_single_llava_hound_main/global_step_100/judge_extract/summary.json
+      judge_overall: 7.373262425289731
+
+launch:
+  driver: scripts/opsd/run_token_budget_judge_extract.sh
+  log: logs/eval/token_budget_judge/driver.log
+
+primary_metric: judge_extract overall.score
+must_watch:
+  - answered_pct
+  - truncated_pct
+  - median_output_tokens
+  - rule_only vs judge delta
+
+activity_log:
+  - at: "2026-08-25T01:40:00+08:00"
+    what: "登记并启动 driver：先 base_tok1024，完成后串行 step100_tok1024；4096 两臂复用归档。"
+  - at: "2026-08-25T01:36:51+08:00"
+    what: "driver 首版 run_arm 参数 bug（--hf 被拆错），base 秒退；step100_tok1024 正常启动。
+           已修 run_token_budget_judge_extract.sh；base 经 chain_after PID 2227096 排队。"

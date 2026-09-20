@@ -1,0 +1,110 @@
+experiment_id: 20260828_thinking_150_250_lastline_eval
+title: "thinking run step 150-250 离线重评：boxed_lastline + sample@4096 + 规则层"
+status: completed
+completed_at: "2026-08-28T21:22:04+08:00"
+parent: 20260827_mvopsd_vlm3r_epoch1_thinking
+
+created_at: "2026-08-28T16:32:00+08:00"
+started_at: "2026-08-28T16:32:00+08:00"
+owner: cursor-agent
+node: node-A
+driver_pid: 3010721
+
+goal: >
+  对昨晚 20260827_mvopsd_vlm3r_epoch1_thinking 的 global_step_{150,175,200,225,250}
+  用与今日基座 step0 相同的口径重新生成并打分。硬约束：response 上限 4096、
+  sample t=1.0/top_p=0.8。与 in-loop boxed@1024 的分数不可并列。
+
+code:
+  git_commit: b6eeb00
+  git_dirty: true
+
+checkpoints:
+  - checkpoints/20260827_mvopsd_vlm3r_epoch1_thinking/global_step_150
+  - checkpoints/20260827_mvopsd_vlm3r_epoch1_thinking/global_step_175
+  - checkpoints/20260827_mvopsd_vlm3r_epoch1_thinking/global_step_200
+  - checkpoints/20260827_mvopsd_vlm3r_epoch1_thinking/global_step_225
+  - checkpoints/20260827_mvopsd_vlm3r_epoch1_thinking/global_step_250
+
+protocol:
+  frames: 32
+  max_tokens: 4096
+  max_model_len: 32768
+  prompt_suffix: ' The final answer MUST BE put in \boxed{} on the last line of your response.'
+  boxed_primary: true
+  judge: 0
+  do_sample: true
+  temperature: 1.0
+  top_p: 0.8
+
+command: |
+  setsid nohup bash scripts/opsd/run_thinking_150_250_lastline_eval.sh \
+    > logs/eval/20260828_thinking_150_250_lastline/driver.log 2>&1
+
+outputs:
+  driver_log: logs/eval/20260828_thinking_150_250_lastline/driver.log
+  status: logs/eval/20260828_thinking_150_250_lastline/status.txt
+  per_step: logs/vsi_train_eval/20260827_mvopsd_vlm3r_epoch1_thinking/global_step_<N>_tok4096_sample_boxed_lastline_rule/
+
+anchor:
+  base_rescore_parser_v2: 46.51
+  base_answered_pct: 96.57
+  note: "与 8.27 in-loop 49.07 不可并列（prompt + parser + token cap 都变了）"
+
+metrics:
+  wall_hours: 4.83
+  protocol_check: "5/5 steps max_tokens=4096 do_sample=true"
+  by_step:
+    - step: 150
+      overall: 19.83
+      answered_pct: 48.32
+      boxed_present_pct: 27.78
+      trunc_pct: 71.99
+      wall_min: 55.5
+    - step: 175
+      overall: 20.36
+      answered_pct: 48.01
+      boxed_present_pct: 28.11
+      trunc_pct: 70.90
+      wall_min: 55.4
+    - step: 200
+      overall: 19.95
+      answered_pct: 47.78
+      boxed_present_pct: 24.54
+      trunc_pct: 73.76
+      wall_min: 55.6
+    - step: 225
+      overall: 20.03
+      answered_pct: 48.64
+      boxed_present_pct: 26.96
+      trunc_pct: 71.91
+      wall_min: 55.5
+    - step: 250
+      overall: 21.32
+      answered_pct: 51.60
+      boxed_present_pct: 30.43
+      trunc_pct: 67.88
+      wall_min: 54.4
+
+conclusion: >
+  五档在 lastline+sample@4096 口径下整体平坦（19.83–21.32%），相对基座 46.51%
+  崩塌约 25–27 pp。作答率仅 ~48%（基座 96.57%），截断率 ~68–74%（基座 ~1.7%），
+  boxed 合规率仅 ~25–30%（基座 ~94%）。step 250 略高（21.32% / 作答 51.60%），
+  但仍在噪声量级内。曲线无训练收益信号，退化形态（长输出、少作答、少闭合框）
+  贯穿 150–250。
+
+handoff:
+  current_phase: completed
+  last_updated: "2026-08-28T22:50:00+08:00"
+  owner: cursor-agent
+  next_action: "可选：建 viewer 或补 in-loop val dump 对照；GPU 已释放"
+
+activity_log:
+  - at: "2026-08-28T16:32:00+08:00"
+    actor: cursor-agent
+    action: "登记并启动 5 档 lastline sample@4096 离线评测"
+    result: started
+  - at: "2026-08-28T21:22:04+08:00"
+    actor: driver
+    action: "THINKING_150_250_LASTLINE_DONE，5/5 协议核对通过"
+    result: completed

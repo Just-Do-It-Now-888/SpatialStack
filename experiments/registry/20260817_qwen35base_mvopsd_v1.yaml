@@ -1,0 +1,340 @@
+experiment_id: 20260817_qwen35base_mvopsd_v1
+title: "MV-OPSD v1：冻结 teacher + 评测进训练循环 + 每步样本溯源"
+status: planned  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-17T21:45:00+08:00"
+finished_at: null
+owner: "cursor-window-mvopsd"
+
+goal: >
+  v0 的训练本身跑完了 300 步且无异常，但它的所有 benchmark 数字都因评测协议缺陷作废
+  （ISSUE-003 / LESSON-011），等于这轮训练没有产出任何可判读的结论。
+  v1 要回答 v0 没能回答的问题：MV-OPSD 相对基座是提升还是损伤，损伤（若有）出现在第几步，
+  以及曲线的变化能否归因到训练数据的构成而不是方法本身。
+
+changes_vs_v0:
+  - id: 评测进训练循环
+    what: "CV-Bench 接进 verl 的 _validate()，val_before_train 给出 step 0 基座对照"
+    why: "v0 训完 20 小时后才看到 benchmark 崩了，而 step 50 当时就足以叫停（LESSON-009）"
+  - id: teacher 冻结
+    what: "teacher_regularization 由 ema(0.05) 改为新增的 frozen，teacher 全程停在基座权重"
+    why: >
+      EMA teacher 会跟着 student 漂移，「student 匹配上了 teacher」因此不含任何正确性信息——
+      v0 的 vopd_loss 收敛到 0.003 而回答退化成 170 词散文，两者并不矛盾。
+      冻结后蒸馏目标是发布版 Qwen3.5-4B 的 N 视角后验，是这套设定里唯一不动的量。
+    verification: >
+      新增 self_distillation/teacher_probe 指标（teacher 首个参数分片前 64 个元素之和）。
+      frozen 下逐步恒定，ema 下会漂移；这是「冻结」的结果级验收，不是配置级断言（LESSON-014）。
+  - id: 每步样本溯源
+    what: >
+      rollout JSONL 增加 sample_id / source / subset / scene_id / k_views_student /
+      n_views_teacher / privilege_bucket / view_selection / answer_view_sensitive / uid；
+      wandb 增加 data/step/* 的批次构成指标与分数据源的 response_length。
+    why: >
+      用于事后追溯「表现变化是否来自训练数据源构成」。v0 只有全局均值，
+      无法判断散文漂移是从某一个数据源开始扩散还是全局同时发生。
+  - id: 评测频率
+    what: "首轮用 test_freq=5（而非 10），用于快速确认训练+评测机制稳定"
+    why: "机制刚改造完，前若干步的评测点密一些才能尽早发现链路问题"
+hypothesis: >
+  沿用 v0：低帧预算（1-4 帧）下的空间推理正确率会高于原始 Qwen3.5-4B。
+  但在拿到 step 10 的 CV-Bench 之前，更需要先证伪的是「训练是否在破坏基座能力」——
+  v0 的离线重测显示 step 50 = 76.50 而 step 300 = 72.19（Vision-OPD 官方协议），
+  即分数随训练下降。若 v1 的曲线复现这个下降，应在 step 50 前后叫停而不是训满 300 步。
+
+relations:
+  supersedes: 20260816_qwen35base_mvopsd_v0
+  inherits: >
+    训练配置、数据 parquet、模型起点与 v0 完全一致，未重建任何数据。
+    v0 产物与 registry 已于 2026-08-18 全部删除；历史结论见 LESSON-009/011/012。
+
+code:
+  git_commit: "b6eeb00 + 未提交改动（训练内评测 + judge + Vision-OPD 离线评测链）"
+  git_dirty: true
+  key_files:
+    - scripts/opsd/run_mvopsd.sh                     # TEST_FREQ / VAL_FILE / JUDGE / WANDB_MODE 开关
+    - verl_pkg/verl/trainer/config/mvopsd.yaml       # test_freq 10 / val_before_train / validation_judge
+    - scripts/opsd/build_cvbench_val_parquet.py      # CV-Bench -> verl val parquet
+    - verl_pkg/verl/trainer/ppo/cvbench_metrics.py   # 官方 2D/3D combined 聚合
+    - verl_pkg/verl/trainer/ppo/sample_provenance.py # 新增：每步样本溯源 + 批次构成指标
+    - verl_pkg/verl/workers/actor/dp_actor.py        # 新增 frozen teacher 分支 + teacher_probe
+    - verl_pkg/verl/workers/config/actor.py          # teacher_regularization 增加 "frozen"
+    - scripts/opsd/tests/test_sample_provenance.py   # 新增：溯源与冻结 teacher 的回归测试
+    - verl_pkg/verl/trainer/ppo/ray_trainer.py       # _maybe_judge_validation + 溯源接入
+    - scripts/opsd/mvopsd_judge.py                   # gpt-oss-120b 分级判分 + sleep/wake
+    - scripts/opsd/mvopsd_reward.py                  # 词边界解析 + answered 告警
+    - scripts/opsd/eval_visionopd/                   # 离线 Vision-OPD 协议评测链
+
+environment:
+  train_env: "系统 python3.12 + ~/.local user site（勿在 conda 里起训练）"
+  eval_env: "miniconda3 envs/sr_opsd（离线 lmms_eval 链才需要）"
+  nodes: 1
+  gpus_per_node: 8
+  gpu_type: "95 GiB / 卡"
+  notes: >
+    flash_attn 2.7.4.post1+25.11、transformers 5.5.0、torch 2.10.0+cu128、
+    vllm 0.18.0、ray 2.53.0。视觉塔必须用 sdpa（LESSON-005）。
+    judge 与训练分时共享同样 8 卡，sleep_level 必须为 1（LESSON-014）。
+
+model:
+  backbone: "Qwen3.5-4B (Qwen3_5ForConditionalGeneration)"
+  model_path: "./models/Qwen3.5-4B"
+  model_note: "发布权重，未经任何任务 SFT，与 Vision-OPD 起点一致；不从 v0 的 checkpoint 续训"
+  geometry_encoder: "none"
+
+data:
+  dataset_version: "mvopsd-v0 (seed 20260816, K menu 1/2/4)"
+  note: "与 v0 完全相同的 parquet，未重建"
+  artifacts:
+    train_main: "data/mvopsd/parquet/main_train.parquet (124,306)"
+    holdout: "data/mvopsd/parquet/main_holdout.parquet (2,174)"
+    view_cache: "data/mvopsd/views (474,757 张，24 GB)"
+    # v1 跑的是 native "(A) 3" 排版（2026-08-17 的 cvbench_val.parquet）。
+    # 复现需 build_cvbench_val_parquet.py --prompt-style native。
+    val_cvbench: "native 排版（已删除；见 build_cvbench_val_parquet.py --prompt-style native）"
+
+training:
+  status: running
+  entrypoint: scripts/opsd/run_mvopsd.sh
+  command: >
+    TEST_FREQ=5 EXPERIMENT_NAME=20260817_qwen35base_mvopsd_v1_main
+    scripts/opsd/run_mvopsd.sh main
+  started_at: "2026-08-17T22:00:01+08:00"
+  smoke:
+    at: "2026-08-17T21:50:47+08:00"
+    config: "SMOKE=1，2 步 / batch 8 / n=2 / TEST_FREQ=1 / 64 条 val / judge 开"
+    result: >
+      通过。step 0 基座 combined 94.00，step 1 93.997，step 2 93.75，answered/frac 全程 1.0；
+      judge/pending 0（规则层读完全部行，judge 未唤醒，符合设计）；
+      vopd_loss 0.027 → 0.035；policy_fallback_fraction 恒 0。
+    verifications:
+      teacher_frozen: >
+        self_distillation/teacher_probe 在 step 1 与 step 2 完全相同
+        （0.04456961154937744）。这是冻结的结果级证据，不是配置级断言。
+      provenance: >
+        rollouts/..._smoke/{1,2}.jsonl 每行含 sample_id / source / subset / scene_id /
+        k_views_student / n_views_teacher / privilege_bucket / view_selection /
+        answer_view_sensitive / uid / data_source；
+        wandb 收到 data/step/* 共 20+ 条构成指标，含分数据源的 response_length。
+    artifacts: "checkpoints|rollouts|logs 下的 20260817_qwen35base_mvopsd_v1_main_smoke"
+  parameters:
+    seed: 20260816
+    learning_rate: 2.0e-6
+    total_batch_size: 64        # 64 prompts x rollout_n 4 = 256 序列/步
+    rollout_n: 4
+    total_training_steps: 300
+    max_prompt_length: 4096
+    max_response_length: 1024
+    loss_mode: vopd
+    # 本次运行的实际取值。注意：2026-08-18 之后 mvopsd.yaml 的默认值已改为
+    # token-mean（LESSON-016），因此**重跑 v1 必须显式覆盖回本值**，
+    # 否则得到的不是同一个实验：
+    #   actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean
+    loss_agg_mode: seq-mean-token-mean
+    alpha: 0.5                  # 广义 JSD 的插值系数，不是 JSD/policy 混合权重（LESSON-012）
+    is_clip: 2.0
+    distillation_topk: 100
+    teacher_regularization: frozen   # v0 是 ema(0.05)；见 changes_vs_v0
+    teacher_update_rate: 0.0         # frozen 下被忽略，显式写 0 以免配置读起来像还在跑 EMA
+    image_patch_size: 16
+    gpu_memory_utilization: 0.35
+    vision_attn_implementation: sdpa
+    save_freq: 50
+    test_freq: 5                # v0 计划值为 10，首轮加密以验证机制稳定
+    val_before_train: true
+    resume_mode: auto           # 目录为空，等价于从基座冷启动
+  in_training_eval:
+    benchmark: "CV-Bench 全量 2,638 条，官方 2D/3D combined 聚合"
+    points: "step 0（基座对照）、5、10、…、300，共 61 个"
+    cost_note: >
+      2,638 条 × 61 次不是免费的。若前 20 步确认链路稳定，可改回 TEST_FREQ=10
+      以省下约一半的评测墙钟；改动需在此处与 activity_log 中记录实际值。
+    generation: "greedy，temperature 0 / do_sample false，与离线协议一致"
+    judge: >
+      gpt-oss-120b（本地 vLLM，port 8100，sleep level 1），
+      只对规则层读不出选项字母且行数 >= min_rows(16) 的情况唤醒。
+      失败一律降级为规则分，不影响训练。
+    alarms:
+      - "val-core/cvbench/answered/frac：格式崩溃告警，跌破 1.0 说明模型开始不给选项字母"
+      - "val-aux/cvbench/judge/woken：judge 被唤醒本身就是模型开始跑题的信号"
+      - "actor/policy_fallback_fraction：应恒为 0，非 0 说明有样本缺 teacher 视图"
+      - "self_distillation/teacher_probe：应逐步恒定，变化即说明 teacher 没有真正冻结"
+      - "data/step/source/*/response_length/mean：分数据源的回答长度，散文漂移的早期信号"
+
+  sample_provenance:
+    per_row: >
+      rollouts/<experiment>/<step>.jsonl 每行新增 sample_id、source、subset、scene_id、
+      k_views_student、n_views_teacher、privilege_bucket、view_selection、
+      answer_view_sensitive、uid、data_source。
+      uid 用于把同一 prompt 的 4 条 rollout 归组。
+    per_step: >
+      wandb 的 data/step/* ：num_sequences / num_prompts / num_unique_samples、
+      source|k_views_student|n_views_teacher|privilege_bucket|view_selection 的构成比例、
+      k/n 均值、answer_view_sensitive 比例、分数据源的 response_length 均值
+      （reward 非平凡时还会有分数据源的 score 均值）。
+    intended_use: >
+      当 CV-Bench 曲线出现跳变时，先比对同期的 data/step/* 构成，
+      排除「这一段恰好抽到了某个数据源」再讨论方法效应。
+  artifacts:
+    output_dir: "checkpoints/20260817_qwen35base_mvopsd_v1_main"
+    train_log: "logs/train/20260817_qwen35base_mvopsd_v1_main/"
+    rollouts: "rollouts/20260817_qwen35base_mvopsd_v1_main"
+    validation_dumps: "logs/val/20260817_qwen35base_mvopsd_v1_main"
+    wandb: "slcheng/MV-OPSD run 20260817_qwen35base_mvopsd_v1_main"
+  results:
+    metrics: {}
+    summary: ""
+    failure_reason: ""
+
+evaluation:
+  status: planned
+  entrypoint: scripts/opsd/eval_visionopd/run_eval.sh
+  command: ""
+  benchmarks: [cvbench, vsibench]
+  parameters:
+    protocol: "Vision-OPD 官方 eval，默认值全部对齐上游（LESSON-013）"
+    note: >
+      训练内 CV-Bench 是训练信号，不是对外可比的 benchmark 口径；
+      最终数字仍以 scripts/opsd/eval_visionopd/ 的离线链为准。
+  artifacts:
+    eval_root: "logs/eval_visionopd/"
+  results:
+    metrics: {}
+    summary: ""
+    failure_reason: ""
+  baseline_reference:
+    base_cvbench_full:
+      value: 86.96
+      measured_at: "2026-08-17T22:07:00+08:00"
+      how: >
+        v1 的 val_before_train，CV-Bench 全量 2,638 条，训练内协议
+        （greedy，词边界解析，规则层 + judge 分级）。
+      detail: >
+        2D 82.43（ADE20K 76.78 / COCO 88.07）、3D 91.50（Omni3D）；
+        answered/frac 0.9992，judge/pending 仅 2 行（低于 min_rows 16，judge 未唤醒）。
+      note: >
+        这是本项目第一次拿到全量基座分。此前的 76.09 来自 64 条子集且用的是旧 val prompt，
+        已被此值取代，不再引用。
+    base_cvbench_partial_deprecated:
+      value: 76.09
+      how: "2026-08-17 13:51 的冒烟 run，64 条分层子集 + 旧 val prompt"
+      note: "作废，仅保留以说明历史数字的来源"
+    v0_offline_visionopd:
+      step_50: 76.50
+      step_300: 72.19
+      note: "Vision-OPD 官方协议重判 v0 checkpoint 的结果；v1 曲线应与之对照"
+
+handoff:
+  current_phase: training
+  last_updated: "2026-08-18T00:30:00+08:00"
+  current_task: "跑满 300 步；为 rollout8 对照实验释放 GPU"
+  owner: "cursor-window-mvopsd"
+  active_job_id: "scripts/opsd/run_mvopsd.sh main (约 step 65/300)"
+  resources: "8 卡全部占用（训练 8 卡 + judge 分时共享）"
+  blocker: ""
+  next_action: >
+    训满 300 步后更新本 registry 的 metrics/conclusion；
+    接着由 20260818_qwen35base_mvopsd_v1_rollout8 接管 8 卡（先 smoke n=8，再正式跑）。
+
+issues:
+  - id: ISSUE-103
+    status: open  # 只要 v1 还在跑就一直成立
+    phase: training
+    discovered_at: "2026-08-18T03:05:00+08:00"
+    symptom: >
+      v1 若因任何原因中断后用同一条命令重启，不会恢复成同一个实验：
+      `loss_agg_mode` 会在实验中途从 seq-mean-token-mean 变成 token-mean，
+      `test_freq` 从 5 变成 15，`save_freq` 从 50 变成 15。曲线会在 step 50 处
+      出现接缝，而日志与 wandb 都不会给出任何告警。
+    evidence: >
+      v1 训练进程启动于 2026-08-17 22:01:29（`ps -o lstart`，训练日志
+      train_20260817_220130.log 的 config dump 即此刻打印）；
+      mvopsd.yaml 的 mtime 是 2026-08-18 01:26:11，比启动晚 3 小时 25 分，
+      未提交 diff 含 `loss_agg_mode: seq-mean-token-mean → token-mean`、
+      `test_freq: -1 → 15`、`save_freq: 50 → 15`。
+      同时 `trainer.resume_mode=auto` 且 checkpoints/20260817_qwen35base_mvopsd_v1_main/
+      已存在 global_step_50，auto 会直接从它续训。
+    root_cause: >
+      为准备 rollout8 而修改了 v1 正在使用的同一份 mvopsd.yaml。运行中的进程
+      在启动时就把配置读入内存，改文件不影响它，于是「磁盘上的配置」与
+      「实际在跑的配置」分叉；而 resume_mode=auto 会让重启同时捡起旧 checkpoint
+      和新配置，把两者拼在一起。
+      与 ISSUE-101 是同一类问题的另一面：那次是实验名共享导致误续 checkpoint，
+      这次是配置文件共享导致续跑时静默换参。
+    solution: >
+      v1 中断后**不得**直接重跑 `TEST_FREQ=5 EXPERIMENT_NAME=... run_mvopsd.sh main`。
+      必须显式覆盖回本次运行的实际取值：
+        TEST_FREQ=5 SAVE_FREQ=50 EXPERIMENT_NAME=20260817_qwen35base_mvopsd_v1_main \
+          scripts/opsd/run_mvopsd.sh main \
+          actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean
+      重启后应核对新日志开头的 config dump 与本 registry 的 parameters 一致，
+      再确认 wandb 曲线在接缝处没有台阶。
+    prevention: >
+      为新实验改配置时，先确认没有正在运行的实验依赖同一份文件；
+      若有，改动应通过启动命令的 CLI 覆盖或独立 config 文件表达，而不是原地改共享 yaml。
+      另外：判断一个 run 用了什么参数，唯一可信来源是它自己训练日志开头的 config dump，
+      不是当前磁盘上的 yaml。
+  - id: ISSUE-101
+    status: resolved
+    phase: training
+    discovered_at: "2026-08-17T21:40:00+08:00"
+    symptom: >
+      按默认 EXPERIMENT_NAME 启动会静默从 v0 的 global_step_300 续训，
+      而不是从基座 Qwen3.5-4B 冷启动。
+    evidence: >
+      checkpoints/20260816_qwen35base_mvopsd_v0_main/ 下存在 global_step_50..300，
+      latest_checkpointed_iteration.txt 内容为 300；正式训练走 resume_mode=auto
+      （只有 SMOKE=1 才追加 resume_mode=disable）；
+      run_mvopsd.sh 的默认 EXPERIMENT_NAME 正是 20260816_qwen35base_mvopsd_v0_main。
+    root_cause: >
+      v0 与 v1 共用同一个实验名，而 verl 的 auto 恢复只看目录里有没有 checkpoint。
+      这正是 LESSON-006 描述的情形，v0 结束后目录未清理。
+    solution: >
+      v1 用独立实验名 20260817_qwen35base_mvopsd_v1_main，checkpoint / rollout /
+      val dump / wandb run 全部落到新目录，v0 产物原样保留。
+    prevention: >
+      重跑同一设置时先确认 checkpoints/<experiment_name> 是否为空；
+      不复用已完成实验的名字，除非确实要续训。
+
+activity_log:
+  - at: "2026-08-18T20:15:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "重建训练内 val parquet 对齐 lmms_eval 题面；本实验所用 native 版另存保留"
+    result: >
+      本实验与 rollout8 都已训满 300 步、无进程占用该文件后，
+      data/eval/cvbench_verl/cvbench_val.parquet 被重建为 lmms_eval 排版
+      （`A. 3`，去掉数据集自带的 "Select from the following choices."），
+      消除报告 §4.3.3 记录的最后一处口径差。
+      **本实验实际使用的 native 排版文件按原字节保留为 cvbench_val_native.parquet**
+      （md5 c08f38b6afa6c4c93f8d4ee17b3423d2），复现本实验曲线必须显式指向它。
+      重建只改题面文本，行序 / index / ground_truth / 图片路径与像素预算逐条不变，
+      因此本实验已落盘的 combined 86.96 / 83.57 等数字不受影响，仍以 native 口径成立。
+      细节见 rollout8 registry 同一时刻的 activity_log 条目。
+  - at: "2026-08-17T22:00:01+08:00"
+    actor: cursor-window-mvopsd
+    action: "smoke 通过后启动正式训练"
+    result: >
+      TEST_FREQ=5，300 步，冷启动（checkpoints/20260817_qwen35base_mvopsd_v1_main 为空）。
+      启动日志 /tmp/mvopsd_v1_train.log。
+  - at: "2026-08-17T21:47:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "按用户要求实现三处改动：评测加密到每 5 步、冻结 teacher、每步样本溯源"
+    result: >
+      新增 verl/trainer/ppo/sample_provenance.py（溯源列 + data/step/* 构成指标）、
+      dp_actor.py 的 frozen 分支与 teacher_probe、config/actor.py 接受 "frozen"、
+      scripts/opsd/tests/test_sample_provenance.py（16 项检查全绿）。
+      既有回归测试 test_validation_judge.py 与 test_cvbench_val_parity.py 复跑仍全绿。
+  - at: "2026-08-17T21:45:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "启动前检查：确认每 10 步评测一次，并核对启动条件"
+    result: >
+      评测频率确认成立（mvopsd.yaml test_freq=10、run_mvopsd.sh TEST_FREQ=10、
+      ray_trainer.py 的 global_steps % test_freq == 0 分支），
+      加上 val_before_train 共 31 个评测点。
+      同时发现两件事：一是 checkpoint 目录会导致静默续跑（ISSUE-101），改用新实验名；
+      二是 v0 记录的阻塞项「reward 恒为 0」定性有误——该配置下 reward 不进梯度
+      （见 LESSON-012 与 v0 registry 的 ISSUE-004 更正），不构成阻塞项。
+
+notes:
+  conclusion: ""
+  next_step: ""

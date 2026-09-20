@@ -1,0 +1,648 @@
+experiment_id: 20260820_mvopsd_view_ratio
+title: "MV-OPSD 视角落差比例：student = N/2 vs N/4，两机各一条 arm"
+status: running  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-20T01:30:00+08:00"
+finished_at: null
+owner: "cursor-window-mvopsd"
+
+goal: >
+  前四轮（v1、rollout8、lr5e6 x b64/b128、lr1e5 x b64/b128）都收敛到低于自身基座
+  约 3~6.5 分的 CV-Bench 渐近线。
+  [2026-08-21 订正] 本段原写「JSD 平台一律停在 0.0157」，与实测不符：0.0157 是 v1 的值，
+  四条 sweep arm 实测 0.0183~0.0217 且随 LR 单调抬高（见
+  20260818_mvopsd_lr_batch_sweep.yaml 的 results.vs_decision_criteria）。
+  本轮设计与结论不受影响，但正确的表述是「平台不降反升」而非「平台不动」。
+  优化侧的两个旋钮（LR、batch）
+  已被证明只改变到达平台的轨迹。用户提出新的怀疑方向：**student 拿到的视角数太少**，
+  导致 teacher 的分布对 student 不可达。本轮把 student 预算从「逐样本随机 K∈{1,2,4}」
+  改成「相册的固定比例」，在 N/2 与 N/4 两个点上测这条假设。
+
+hypothesis: >
+  用户假设：student 视角太少是损伤的主因，把预算提到相册的 1/2 后损伤应明显变轻。
+  支持性证据（方向性，不能定量）：用 tools/jsd_by_k_regression.py 对 lr5e6_b64 的
+  300 步日志做去趋势横截面回归，K=1 占比的斜率 +0.0082（95% CI [+0.0046,+0.0121]），
+  折算「全 K=1 vs 全 K=4」相差约 0.012，而当时 JSD 水平只有 0.019~0.031，即差值占
+  四到六成。
+  反向证据（必须留出）：JSD 绝对值全程只有 ln2 的 2%~6%（step 1 = 0.041 → 平台 0.0157），
+  而 response 平均 250 token 且绝大多数是与视角无关的散文。若真实信号集中在少数答案
+  token 上，token-mean 会把它稀释约两个数量级，那么无论 K 取多少，梯度主要在改写作风格
+  ——这与「空间能力只掉 3~6 分、作答格式彻底崩坏、Count 掉幅最大」的既有症状更吻合。
+  本轮若两臂表现相同，则 K 方向被否掉，下一轮应转向 token 加权。
+
+grouping_rationale: >
+  两条 arm 是两个模型设定，合并在一个 registry 里是因为它们共享同一假设、同一套判读
+  标准与同一次分析，且数据是同一次生成的嵌套产物。每条 arm 有独立实验名与产物路径。
+
+known_limitation: >
+  **本轮无法分离「student 视角太少」与「teacher/student 落差太大」。**每条样本的 N 固定，
+  所以 student 拿 N/2 就必然意味着落差是 2 倍，两个变量绑死。这个区分很重要：若主因是前者，
+  说明 student 必须看够视角才学得动，方法主打的「低帧预算可用」失去立足点；若是后者，
+  只需把 teacher 压低（例如 teacher = 2K），student 可继续只看 1~2 张，方法成立且改动免费。
+  需要第三条 arm（student = N/4、teacher = 2K）才能分开，视本轮结果决定是否追加。
+
+arms:
+  - arm_id: khalf
+    experiment_name: 20260820_qwen35base_mvopsd_khalf_main
+    node: node-A
+    student_budget: "N/2"
+    k_by_n: {8: 4, 32: 16}
+    mean_k: 6.96
+    mean_ratio: 2.00
+    student_visual_tokens_mean: 1337
+    train_file: data/mvopsd/parquet_k_half/main_train.parquet
+    expected_wallclock_hours: "约 14.5（实测 123.0 s/步 x 300 = 10.3h，加 20 次 CV-Bench 评测约 3.7h 与存档开销）"
+    measured_at_launch:
+      step_time_s: 123.0            # step 5
+      max_memory_allocated_gb: 64.8
+      prompt_length_max: 3311       # 与离线预测峰值 3,340 相符，上限 4096
+      k_views_student_frac: {4: 0.75, 16: 0.25}   # mean 7.0
+      n_views_teacher_mean: 14.0
+  - arm_id: kquarter
+    experiment_name: 20260820_qwen35base_mvopsd_kquarter_main
+    node: node-B
+    student_budget: "N/4"
+    k_by_n: {8: 2, 32: 8}
+    mean_k: 3.48
+    mean_ratio: 4.00
+    student_visual_tokens_mean: 668
+    train_file: data/mvopsd/parquet_k_quarter/main_train.parquet
+    expected_wallclock_hours: "约 13.3（实测 110.2 s/步 x 300 = 9.2h，加 20 次 CV-Bench 评测约 3.7h 与存档开销）"
+    measured_at_launch:
+      step_time_s: 110.2            # step 7
+      max_memory_allocated_gb: 61.7
+      prompt_length_max: 1676
+      k_views_student_frac: {2: 0.828, 8: 0.172}  # mean 3.03
+      n_views_teacher_mean: 12.1
+
+relations:
+  reference_runs:
+    - 20260818_qwen35base_mvopsd_lr5e6_b64_main   # 同 lr/batch/n，随机 K∈{1,2,4}，但**不同池**
+  inherits: >
+    基座权重、frozen teacher、rollout.n=4、batch 64、300 步、token-mean、seed、
+    max_prompt/response 长度、训练内 CV-Bench 协议均与 lr5e6_b64 一致；
+    lr 同为 5.0e-6。差异只有训练数据的池与 student 视角预算。
+  not_comparable_because: >
+    参照 run 的池含 spar_3view（27.2%），本轮池不含。两臂只能互相比较、各自用
+    val_before_train 的 step 0 归一化，**不得与 86.96 / 83.57 等历史绝对值并列**。
+
+data:
+  pipeline: >
+    复用现有 plan 与视角缓存，不重跑 stage 2。只重算 view_indices 与随之而来的
+    Frame-N 重编号，再重写 parquet。
+  commands:
+    - "python scripts/opsd/build_view_ratio_plans.py"
+    - "python scripts/opsd/write_mvopsd_parquet.py --plan data/mvopsd/plan_k_half --out data/mvopsd/parquet_k_half --arms main --check-files"
+    - "python scripts/opsd/write_mvopsd_parquet.py --plan data/mvopsd/plan_k_quarter --out data/mvopsd/parquet_k_quarter --arms main"
+  filter: "n_views >= 8（等价于既有的 privilege_bucket == strong）"
+  counts:
+    source_plan: 126480
+    kept_after_filter: 84797
+    dropped: {spar_3view: 34470, llava_hound_64k: 6986, vlm3r_scannet: 227}
+    train_rows: 83123
+    holdout_rows: 1674
+    composition: {llava_hound_64k: "36.7%", vlm3r_scannet: "36.5%", spar_32view: "24.7%", vsi_appr_order: "2.1%"}
+  teacher_side: >
+    两臂完全相同（teacher 看全部 N 视角）：mean N = 13.93，max N = 32，
+    视觉 token 均值 2674 / 峰值 6144，teacher prompt 峰值 6540 token（上限
+    max_reprompt_len = 12288）。teacher 是本轮的对照，不参与变化。
+  nesting: >
+    N/4 的视角子集是 N/2 子集的真子集（一次洗牌切片得到），且两份 parquet 行序完全一致，
+    因此同一 step 两臂看到的是同一批样本，唯一差异是多给的那几张视角。
+  verification:
+    - "student prompt token：half max 3340 / quarter max 1738，上限 4096（rollout.prompt_length 继承 data.max_prompt_length），无一超限；prompt+1024 response 亦未超 max_model_len 5120"
+    - "解析式长度公式与真实 processor 在最长的 10 行上逐行一致（工具 tools/check_prompt_lengths.py，含真实图片）"
+    - "teacher prompt token max 6540 < 12288"
+    - "嵌套违例 0；两臂行序一致 True；K<N 违例 0"
+    - "悬空 Frame-N：student 0、teacher 0（两臂）"
+    - "占位符与图片数不匹配：student 0、teacher 0（两臂）"
+    - "视角文件 344,627 个全部可读且 patch 对齐；node-B 抽查 32,588 个引用 0 缺失"
+  why_this_filter: >
+    N>=8 保证 N/4 仍有 >=2 视角，落差是真的；同时把 spar_3view 整批排除——它的 N=3，
+    结构上只能产生 K∈{1,2}，使「视角少」与「来自该源」在任何聚合读数里成为同一个变量
+    （这正是 jsd_by_k_regression 里 source 与 K 共线、各自 R^2 相当的原因）。
+
+code:
+  git_commit: "未提交"
+  git_dirty: true
+  key_files:
+    - scripts/opsd/build_view_ratio_plans.py      # 新增：按比例重算 student 视角，两臂嵌套
+    - scripts/opsd/tools/check_prompt_lengths.py  # 新增：离线核 prompt 长度（配置不做过滤且 truncation=error）
+    - scripts/opsd/tools/jsd_by_k_regression.py   # 新增：从既有日志倒推按 K 的 JSD
+    - scripts/opsd/run_mvopsd.sh                  # 未改动，md5 7cdb9fcde2643ceb2578b58b4b2aefdd
+    - verl_pkg/verl/trainer/config/mvopsd.yaml    # 未改动，md5 ce9762546a32c84204c4916bc920fb9b
+    - scripts/opsd/mvopsd_reward.py               # 未改动，md5 a55b9c8d2596f7694eaf12762312047e（含 ISSUE-104 修复）
+  cross_node_parity_verified: >
+    两机 md5 一致：parquet_k_half/main_train 28c20bba、parquet_k_quarter/main_train 0cd9c770、
+    cvbench_val c4f32baf、run_mvopsd.sh 7cdb9fcd、mvopsd.yaml ce976254、mvopsd_reward.py a55b9c8d。
+
+parameters:
+  shared:
+    arm: main
+    model: ./models/Qwen3.5-4B
+    teacher_regularization: frozen
+    lr: 5.0e-6
+    train_batch_size: 64
+    ppo_mini_batch_size: 64          # = batch，故每步一次更新，严格 on-policy
+    ppo_micro_batch_size_per_gpu: 1
+    rollout_n: 4
+    sequences_per_step: 256
+    total_training_steps: 300
+    test_freq: 15
+    save_freq: 15                    # 与 test_freq 对齐：每个评分点都有权重（LESSON-015）
+    lr_warmup_steps: 10
+    lr_schedule: "10 步线性 warmup 后恒定，无 decay"
+    clip_grad: 1.0
+    loss_agg_mode: token-mean
+    alpha: 0.5
+    distillation_topk: 100
+    is_clip: 2.0
+    max_prompt_length: 4096
+    max_response_length: 1024
+    seed: 20260816
+    judge: "enabled (gpt-oss-120b, port 8100, sleep level 1)"
+    val_file: data/eval/cvbench_verl/cvbench_val.parquet  # lmms_eval 题面
+  launch_commands:
+    node-A: >
+      EXPERIMENT_NAME=20260820_qwen35base_mvopsd_khalf_main
+      TRAIN_FILE=$PWD/data/mvopsd/parquet_k_half/main_train.parquet
+      TOTAL_STEPS=300 TEST_FREQ=15 SAVE_FREQ=15
+      setsid nohup bash scripts/opsd/run_mvopsd.sh main actor_rollout_ref.actor.optim.lr=5.0e-6
+    node-B: >
+      EXPERIMENT_NAME=20260820_qwen35base_mvopsd_kquarter_main
+      TRAIN_FILE=$PWD/data/mvopsd/parquet_k_quarter/main_train.parquet
+      TOTAL_STEPS=300 TEST_FREQ=15 SAVE_FREQ=15
+      setsid nohup bash scripts/opsd/run_mvopsd.sh main actor_rollout_ref.actor.optim.lr=5.0e-6
+
+decision_criteria:
+  - metric: "谷底深度（相对自身 step 0）"
+    reference: "v1 −9.86pp @ step 30"
+    read_as: "N/2 明显变浅 → 支持用户假设"
+  - metric: "饱和渐近线 C（相对自身 step 0）"
+    reference: "v1 −3.72pp；lr5e6_b64 最佳 83.89"
+    read_as: "两臂渐近线之差是本轮的主结果之一"
+  - metric: "JSD 平台值 actor/vopd_loss"
+    reference: 0.0157
+    read_as: "若 N/2 的平台明显低于 N/4，说明落差确实随视角数收窄"
+  - metric: "VSI-Bench @ 32 帧（主指标）"
+    read_as: >
+      唯一能判定方法有效性的量。用户 2026-08-20 收敛为「只测全局最佳 checkpoint @32 帧」，
+      因此原计划的 arm x 帧预算网格本轮不做，低帧迁移问题留待后续。
+      读数必须同时看 vsibench_answered：分数下降若伴随 answered 下降，是作答格式崩坏，
+      不是空间能力退化，两者需要不同的应对。
+
+comparison_scope:
+  status: 待核对
+  clarified_at: "2026-08-20T12:57:00+08:00"
+  statement: >
+    本轮两条 arm 的训练超参**不止 K 一项不同**，且这是有意设计：用户的目的就是对比
+    两组不同训练超参配置的整体性能差异，而不是做 K 的单变量消融。
+  consequence: >
+    结论只能表述为「配置 A 优于/相当于配置 B」，**不可归因到 view ratio 单一变量**。
+    experiment_id 与 arms 里的 "view_ratio / N2 vs N4" 命名容易被后来者读成单变量消融，
+    写报告时必须改写措辞，或补一条真正只改 K 的对照臂。
+  correction_history: >
+    2026-08-20 12:56 agent 曾把超参不一致误判为混淆因素，并宣布跨臂选点失效；
+    12:57 用户澄清那正是实验目的，该误判已撤销。保留以存更正过程。
+  todo: "补两臂逐项超参 diff（launch 命令 + 生效 config），报告前必须完成"
+
+interpretation_rule: >
+  两臂表现相同 → K 方向被否掉，下一轮转向 token 加权（见 hypothesis 的反向证据）。
+  N/2 明显更好 → 需要追加第三条 arm（K=N/4 + teacher=2K）才能判断该把 student 提高
+  还是把 teacher 压低。CV-Bench 回到基座**不构成方法有效的证据**，它只是护栏。
+
+must_watch:
+  - "actor/vopd_loss：平台值与 0.0157 的关系"
+  - "actor/grad_norm：是否顶在 clip_grad=1.0（lr 5e-6 下 v1 稳态约 0.5）"
+  - "val-core/cvbench/answered/frac：格式崩溃告警"
+  - "val-aux/cvbench/judge/woken：模型开始跑题"
+  - "actor/policy_fallback_fraction：应恒为 0"
+  - "self_distillation/teacher_probe：应恒定（teacher 冻结）"
+  - "data/step/k_views_student/*/frac：half 应为 4 与 16 两档，quarter 为 2 与 8"
+  - "response_length/mean 与分源 response_length：散文漂移"
+
+artifacts:
+  per_arm_pattern:
+    checkpoints: "checkpoints/<experiment_name>"
+    train_log: "logs/train/<experiment_name>/"
+    val_dumps: "logs/val/<experiment_name>/"
+    rollouts: "rollouts/<experiment_name>"
+    wandb: "slcheng/MV-OPSD run <experiment_name>"
+  checkpoint_budget: >
+    save_freq=15 x 300 步 = 每条 20 个 x 约 55GB ≈ 1.1T。每机只跑一条，
+    node-A 3.6T / node-B 3.5T 空闲，充裕。
+  retention_rule: >
+    **训练内 CV-Bench 最佳的 checkpoint 与最后一步的 checkpoint 都要保留**，其余可删。
+    保留最后一步是为了检验「用 CV-Bench 挑 checkpoint」这条规则本身是否敏感：
+    上一轮四条 arm 的最优步散落在 225/300/180/150，说明后期曲线接近平坦，argmax
+    可能落在噪声里（跨机基线本身有 0.25 分抖动）。两个 checkpoint 的 VSI 若接近，
+    该选法站得住；若差很多，说明选法有问题，而这只有留了第二个权重才看得出来。
+
+training_metrics:
+  measured_at: "2026-08-21"
+  source: >
+    解析 logs/train/<experiment_name>/train_*.log（kquarter 经 ssh opsd2 取回）。
+    口径与 lr_batch_sweep 的 results 一致：末段均值 = 最后 5 个评测点平均；
+    JSD 平台 = 最后 20 个训练步的 actor/vopd_loss 均值。
+  khalf:
+    step0: 86.21
+    trough: "79.19 @ step 195"
+    best: "83.79 @ step 120"
+    tail_mean_last5: 79.90
+    delta_vs_step0: -6.31
+    jsd_step1: 0.0196
+    jsd_plateau: 0.0198
+    grad_norm_steady: 0.45
+    median_step_seconds: 119.1
+    completed_steps: 250   # 按用户要求提前终止
+  kquarter:
+    step0: 86.23
+    trough: "77.61 @ step 195"
+    best: "83.26 @ step 75"
+    tail_mean_last5: 79.27
+    delta_vs_step0: -6.96
+    jsd_step1: 0.0365
+    jsd_plateau: 0.0237
+    grad_norm_steady: 0.46
+    median_step_seconds: 111.6
+    completed_steps: 267   # 按用户要求提前终止
+  reading: >
+    两条并列的结论，缺一条都会误导：
+    1) **机制成立**：K 从 N/4 提到 N/2，step 1 的 JSD 从 0.0365 降到 0.0196，几乎减半。
+       视角预算确实控制着 teacher/student 的信息落差，这与 hypothesis 的方向一致。
+    2) **收益不成立**：落差减半没有换来任何下游改善。khalf 的 JSD 从 step 1 的 0.0196
+       到 250 步后的 0.0198 基本是一条水平线——在这个落差下已经没有什么可学的了——
+       而 CV-Bench 仍低于自身基座 6.31 分，并不优于随机 K 的 −3.7 ~ −4.5。
+    两臂 CV-Bench 最佳点仅差 0.53pp（83.79 vs 83.26），单种子无误差棒，
+    不足以给两套配置排名。
+    按 interpretation_rule，两臂表现相当 → **K 方向被否掉**，下一轮转向 token 加权。
+    注意本轮池不含 spar_3view，delta 与 sweep 各 arm 的 delta 属不同池，只比趋势。
+
+evaluation:
+  status: done
+  results:
+    readout_rule: >
+      同一 harness 内才可比。HF/lmms_eval 与 vLLM 在基座上差 0.82 分（53.40 vs 52.58），
+      截断率与长度分布一致，差异来自引擎而非协议，因此两列不可混表。
+      同时全部为 spatialstack 协议（1024 token + 自有解析），
+      **不可与历史 16-token 协议下的 64.24 / 67.65 等数字并列**。
+    qwen35_4b_base:
+      hf_1024: {overall: 53.40, answered_pct: 99.98, truncated_pct: 2.05, median_tokens: 3}
+      vllm_1024: {overall: 52.58, answered_pct: 99.94, truncated_pct: 2.18, median_tokens: 4}
+      judge_extract_1024: {overall: 53.47, delta: +0.08, flips: "11 对 7，近似对称"}
+    khalf_main_step120:
+      hf_1024: {overall: 34.82, answered_pct: 93.51, truncated_pct: 21.07, median_tokens: 205}
+      vllm_4096: {overall: 33.38, answered_pct: 93.51, truncated_pct: 20.47, median_tokens: 205}
+    degeneration_onset:
+      note: >
+        同一 60 场景子集（632 题）、同一 vLLM harness、同为 1024 预算，因此三点严格可比。
+        子集分数与全量分数不可并列（基座全量 52.58 vs 子集 54.15）。
+      base:    {overall: 54.15, answered_pct: 100.00, truncated_pct: 0.00,  median_tokens: 4}
+      step45:  {overall: 43.18, answered_pct: 96.52,  truncated_pct: 14.40, median_tokens: 168}
+      step120: {overall: 35.61, answered_pct: 93.99,  truncated_pct: 17.56, median_tokens: 196}
+      reading: >
+        单调下滑，**step 45 已掉 11 分**，无回头迹象；退化不是训练后期事件，从早期就开始。
+        基座中位长度 4 token（按提示词直接给选项字母），训练后跳到 168~196 token，
+        即训练把「直接作答」改成了「写长推理」，而其中一部分收不住并滑入重复循环。
+        应在更早的 checkpoint（step 15 / 30）继续回溯，确认是否从第一个评测点就已发生。
+    conclusion: >
+      **khalf step 120 在 VSI-Bench 上相对基座崩塌约 19 分**（同为 vLLM harness：
+      52.58 -> 33.38）。原因不是评测预算：预算从 1024 放宽到 4096 后，
+      answered 仍为 93.51%、解析失败仍为 333 条、中位长度仍为 205 token、
+      截断率仅从 21.07% 降到 20.47%——原来撞 1024 的那批改撞 4096。
+      解析失败的响应形态是**重复退化**：模型逐帧枚举
+      （"the fiftieth image shows a chair... the fifty-first image shows a chair..."）
+      或直接数数（"189, 190, 191, ... 234"），刷满任何给定预算也不给答案。
+      judge 在这里也救不了，因为响应里根本没有答案可抽。
+      分题型看，object_counting 截断 57~58%、object_rel_distance 约 35%，
+      即长视频推理路径整体崩坏，而非个别题型。
+    guardrail_failure: >
+      **该 checkpoint 是两臂 33 个训练内评测点中 CV-Bench 最高的（83.79%）**。
+      单图四选一的护栏对 32 帧视频上的重复退化完全不敏感，
+      训练全程没有任何指标提示这一崩溃。
+      已据此更换护栏，见 evaluation.in_training_next 与 LESSON-020。
+  in_training: >
+    本轮实测为「仅 CV-Bench（2,638 条护栏指标）」，且该护栏已被证伪
+    （见 guardrail_failure）。自 2026-08-20 起改为下面的 in_training_next，
+    从下一轮训练生效；本轮结果不受影响。
+  in_training_next:
+    decided_by: "用户 2026-08-20 16:00"
+    what: >
+      训练过程评测改为 **VSI-Bench 全量（5,130 题）@32 帧**，spatialstack 协议，
+      vLLM 推理，规则层打分 + LLM judge 只补规则没接受的那部分。
+      CV-Bench 训练内评测同时关闭（run_mvopsd.sh 在 VSI_EVAL=1 时置 TEST_FREQ=-1）。
+    why: >
+      CV-Bench（单图四选一、16 token 就能答完）对 32 帧视频上的重复退化完全不敏感，
+      本轮最高 CV-Bench 的 checkpoint 正是 VSI 上崩掉 19 分的那个。护栏必须与主指标同分布。
+    where_it_runs: >
+      评测节点，与训练节点分离。训练只负责落 checkpoint；
+      watch_training_vsibench_eval.sh 轮询到新 global_step_* 就评一个。
+    entry:
+      watch: "scripts/opsd/watch_training_vsibench_eval.sh checkpoints/<experiment> --poll 120"
+      single: "scripts/opsd/run_training_vsibench_eval.sh checkpoints/<experiment>/global_step_N"
+      core: "scripts/opsd/vsibench_eval_core.py（生成/打分/judge/错误分类唯一实现）"
+    two_phase: >
+      单机 8 卡装不下 policy 与 judge 两个引擎，因此拆成两段：
+      阶段一 policy 独占 8 卡做 vLLM 生成 + 规则打分，写 samples.jsonl 后退出；
+      等显存归零后，阶段二起 gpt-oss-120b，只对规则没接受的行调 judge，
+      并**原地重算** summary.json / samples.jsonl / failures/。
+      两段都调用 vsibench_eval_core 的同一套函数，避免离线与训练内打分漂移。
+    judge_scope: >
+      选择题：规则判错的行走 Vision-OPD 的 Yes/No 级联；
+      数值题：规则**读不出数**的行走抽取（judge 只回数字，MRA 仍由 lmms_eval 算）。
+      规则已接受的行不重开，因此 judge 只能加分不能减分——
+      这是已知的单向偏置（LESSON-019），所以 summary.json 同时报 rule_only 与 judge_assisted，
+      **趋势判读一律看 rule_only**，judge 列只用来判断「掉分是不是解析造成的」。
+    artifacts:
+      dir: "logs/vsi_train_eval/<experiment>/<step>/"
+      summary_json: >
+        overall + 分题型（n / 分数 / rule_only 分数 / answered% / 截断% / 中位输出长度 /
+        错误分类计数）+ 输出长度分位数（median/p90/p95/p99/max）+ judge 统计
+        （送审行数 / 救回数 / 判不出数 / API 错误数）+ 墙钟与吞吐。
+      samples_jsonl: "逐题：响应全文、输出 token 数、finish_reason、规则层与最终层分数、错误标签"
+      failures_dir: >
+        按标签拆分便于直接翻阅：truncation_error（撞上限）、parse_error（没截断但读不出答案）、
+        partial_error（数值题 0 < MRA < 1）、factual_error（读出来了但答错）、
+        judge_recovered（规则判错、judge 救回）。
+    failure_tag_rule: >
+      判定顺序：满分 → correct；否则截断 → truncation_error；否则读不出 → parse_error；
+      否则 0 < 分数 < 1 → partial_error；否则 factual_error。
+      截断优先于解析失败，因为缺的是尾巴而不是格式。
+      partial_error 只会出现在数值题——选择题分数非 0 即 1。
+    cost: >
+      基座全量 vLLM 生成约 17 分钟（8 卡 TP=8，scenes-per-batch 24），
+      judge 起服约 100 秒 + 判几百行数分钟，单 checkpoint 合计约 25~30 分钟。
+      SAVE_FREQ 默认 50 步；若训练约 1 步/分钟，评测不会积压。
+    wiring_check:
+      at: "2026-08-20T16:06:00+08:00"
+      how: "LIMIT_SCENES=4 JUDGE=1，基座 4 场景 35 题，跑完整两阶段"
+      result: >
+        通过。阶段一 → 二显存归零后交接成功；judge 100 秒就绪；
+        8 行送审、0 行救回、0 判不出、0 API 错误（基座上规则解析本就可靠，符合预期）；
+        summary.json 同时含 rule_only 与 judge_assisted，failures/ 正确落盘。
+        产物留在 logs/vsi_train_eval/_wiring_check/（4 场景，**不是可用分数**）。
+  offline_primary:
+    benchmark: VSI-Bench
+    frames: [32]
+    checkpoint_selection: >
+      用户 2026-08-20 11:30 决定只测一个 checkpoint。两臂 33 个训练内评测点里 CV-Bench
+      combined 最高的是 khalf step 120 = 83.79%（次高 kquarter step 75 = 83.26%）。
+      读数约束：两臂训练超参本就不同（有意设计，见 comparison_scope），跨臂比较是本轮目的，
+      但 0.53pp 的差距在单种子、无误差棒的护栏指标上不足以给两套配置排名——
+      选 khalf 120 是合理取点，不等于它已被证明更优。
+    baseline_anchor: >
+      Qwen3.5-4B 基座 @32 帧，同协议，node-B 并行（run_name=20260820_qwen35base_vsi_anchor）。
+      基座在本项目从未测过 VSI，缺了它单个 checkpoint 的数字无从判读。
+    entry: "scripts/opsd/run_view_ratio_vsi_eval.sh（FRAMES=\"32\"）"
+    protocol:
+      switch: "VSIBENCH_PROTOCOL，默认 spatialstack；lmms_legacy 复现上游 16-token 协议"
+      max_new_tokens: 1024
+      until: "[]（清空，否则 TaskConfig 用空行当停止符，长推理在第一段就被截断）"
+      parser: >
+        scripts/opsd/vsibench_scoring.py。选择题只在题目**实际提供的选项字母**里取答案
+        （优先 "answer is X"，其次 (X)，再次末行裸字母，最后唯一匹配选项正文）；
+        数值题取显式答案句或末行数字，支持千分位。上游的 pred.split(' ')[0] 在长推理下
+        只会读到 "Based"：选择题记 0，数值题 to_float 返回 None 并被记成最差 MRA。
+      metrics_unchanged: >
+        **只改解析，不改指标**。MCA 仍是 exact match，NA 仍是 MRA:.5:.95:.05，
+        总分仍是题型间非加权平均（direction 三档先合并），全部沿用 lmms_eval 原实现。
+      validation: >
+        scripts/opsd/tests/test_lmms_vsibench_protocol.py（新，全绿）。关键一项是回放 5 个
+        历史短答 run：新旧解析器打分逐个完全一致（novggt_aligned 两侧均 64.24），
+        证明改动只是"换了去哪里找答案"，没有移动任何已发布的数字。
+      new_metric: "vsibench_answered——多少行能读出答案，与分数分开报告"
+    not_comparable_with: >
+      1024-token 协议下的绝对值**不可与历史 64.24 / 67.65 等并列**，那些是 16-token 协议下
+      测的 SFT 模型。本轮只能与同协议的基座锚点比。
+    prerequisites:
+      - "merge FSDP checkpoint 成 HF 格式（scripts/opsd/merge_mvopsd_ckpt.sh），目录须含 config.json（LESSON-002）"
+      - "评测跑在 conda sr_opsd，不是训练的系统 python（LESSON-007）"
+      - "取消 HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE（LESSON-003）"
+  skipped_by_decision: >
+    用户 2026-08-20 决定跳过「启动前用基座跑 VSI 冒烟」。可接受的理由：本轮评测是训练后
+    手动执行、不挂在无人值守的自动链上，且 checkpoint 全部保留，所以评测链若报错只损失
+    修复时间，不丢结果。风险已知并接受。
+
+handoff:
+  current_phase: evaluation
+  last_updated: "2026-08-20T16:10:00+08:00"
+  current_task: >
+    本轮 VSI 评测已收口（结果见 evaluation.results）。当前在搭下一轮的训练内评测链：
+    VSI-Bench 全量 @32 帧 + vLLM + LLM judge（只补规则没接受的行），
+    两阶段联调已通过，尚未接到真实训练上。
+  owner: "cursor-window-mvopsd"
+  active_job_id: "无常驻任务；两机 8 卡均空闲"
+  resources: "两机各 8 卡空闲（联调产物已清理，显存归零）"
+  train_logs:
+    node-A: "logs/train/20260820_qwen35base_mvopsd_khalf_main/train_20260820_015637.log（终止于 ~step 250）"
+    node-B: "logs/train/20260820_qwen35base_mvopsd_kquarter_main/train_20260820_015637.log（终止于 ~step 267）"
+  eval_logs:
+    node-A: "logs/eval/_launch/khalf_step120_vsi1024.log"
+    node-B: "logs/eval/_launch/base_anchor_vsi1024.log"
+  blocker: ""
+  next_action: >
+    1) 用新链路回溯更早的 checkpoint（step 15 / 30），确认重复退化是否从第一个评测点就已发生；
+    2) 补两臂逐项超参 diff（launch 命令 + 生效 config），把「两套配置差在哪」写清楚；
+    3) 下一轮训练启动时以 VSI_EVAL=1 运行，并在评测节点挂 watch_training_vsibench_eval.sh。
+
+issues:
+  - id: ISSUE-201
+    at: "2026-08-20T15:49:00+08:00"
+    symptom: >
+      重构后的 eval_vsibench_vllm.py 冒烟：vLLM 生成完成（24 题），
+      但 summary.json / samples.jsonl 一个都没写，进程挂在退出流程里不结束。
+    evidence: >
+      py-spy dump 显示主线程停在 multiprocessing 的 _exit_function → join，
+      即脚本主体已经抛异常退出、卡在 vLLM 关闭。真正的 traceback 被
+      `2>&1 | tail -25` 缓冲吞掉，日志里只剩 NCCL 关闭噪声。
+      杀掉 EngineCore 子进程后父进程立刻退出。
+    root_cause: >
+      build_summary 里按题型和 rule-only 汇总时构造的行少了 question_type 字段，
+      而 lmms_eval 的 vsibench_aggregate_results 第一步就是
+      `results.groupby('question_type')`，直接 KeyError。
+    solution: >
+      分题型分数改为直接取该题型指标的均值（数值上等同于聚合函数对单一题型的输出，
+      且不依赖 groupby）；rule-only 汇总行补回 question_type。
+      补了一个不需要 GPU 的离线自检：造 10 个题型的假记录跑 build_summary + write_results，
+      确认 overall 与上游聚合一致、10 个题型齐全、failures/ 分桶正确。
+    status: resolved
+    prevention: >
+      1. 长跑日志不要接 `| tail`——一旦异常，唯一有价值的那段正好被丢掉；写文件再读。
+      2. 汇总/落盘这类纯 CPU 逻辑必须有不占 GPU 的离线测试，
+         否则每次改动都要付一次 vLLM 起服的代价才知道有没有拼错字段。
+
+  - id: ISSUE-202
+    at: "2026-08-20T16:01:00+08:00"
+    symptom: >
+      run_training_vsibench_eval.sh 阶段二起 judge 服务失败：
+      `/usr/bin/python3: No module named 'vllm'`，但同一台机上单独用系统 python 能 import。
+    evidence: >
+      clean shell 里 `/usr/bin/python3 -c "import vllm"` 输出 0.18.0；
+      `conda activate sr_opsd` 之后同一条命令报 ModuleNotFoundError。
+      打印 sys.path 发现少了 ~/.local/lib/python3.12/site-packages，
+      而 vllm 恰好装在那里；env 里 PYTHONNOUSERSITE=1。
+    root_cause: >
+      judge 服务按 LESSON-007 跑在系统 python 上，而阶段一需要 conda sr_opsd；
+      conda activate 会导出 PYTHONNOUSERSITE=1，把 user site 目录从系统 python
+      的搜索路径里摘掉，正好是 vllm 所在的目录。
+      原 rejudge_vsibench.sh 没踩到，是因为它在 activate 之前就把服务起好了。
+    solution: "起 judge 服务时用 `env -u PYTHONNOUSERSITE`，只对该子进程生效；其余仍在 sr_opsd 内。"
+    status: resolved
+    prevention: >
+      同一脚本里混用两个 python 环境时，跨环境启动的子进程要显式声明它需要的环境，
+      不能假设「系统 python 的 sys.path 不受 conda 影响」——PYTHONNOUSERSITE 就是反例。
+
+  - id: ISSUE-203
+    at: "2026-08-20T17:20:00+08:00"
+    symptom: >
+      训练内 VSI 评测第一次跑通后，step 0 基座得 51.61，
+      而同一份权重、同一套协议在离线 vLLM harness 上是 52.58，差 0.97。
+      逐题型看差异并非均匀噪声：object_rel_direction -5.27、object_counting -4.64，
+      另有两个题型反而 +2 左右。
+    evidence: >
+      打分链本身已排除：test_vsibench_in_training.py 回放归档的 5,130 条真实响应，
+      训练内的 reward + metrics 算出 52.57，与离线公布的 52.58 及 lmms_eval 现算值一致，
+      所以差异只可能来自生成侧。
+      直接比对两侧 apply_chat_template 的渲染结果：离线是
+      `<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user...`，
+      训练内是 `<|im_start|>user...`，没有 system 轮。
+      Qwen3.5 的 chat template 不会自动补默认 system prompt，verl 也只对 parquet 里
+      给的消息套模板（agent_loop.py:287-297），所以少了就是真的少了。
+      响应长度分布同向佐证：离线 mean 374.7 字符，训练内 558.2，
+      中位数同为 3~4——即多出来的都是长尾的跑题，正是选择题掉分最多的那几个题型。
+    root_cause: >
+      build_vsibench_val_parquet.py 照抄了 build_cvbench_val_parquet.py 的 prompt 结构，
+      而后者只有 user 一轮。CV-Bench 那边两侧都没有 system 轮所以自洽，
+      VSI 的离线路径（lmms_eval/models/qwen3_5.py）却是带 system 轮的，照抄就产生了偏差。
+    solution: >
+      val parquet 的 prompt 改为 [{system: "You are a helpful assistant."}, {user: ...}]，
+      重建（帧已缓存，只重写 parquet，约 2 秒）。
+      重建后核对：训练内渲染结果与离线协议在归一化图像占位符后逐字节一致。
+    status: resolved
+    prevention: >
+      新建一个「训练内要对齐离线」的验证集时，光对齐题面文本不够，要把
+      apply_chat_template 的**最终渲染字符串**拿来逐字节 diff，system 轮、
+      generation prompt、thinking 块都在里面。
+      这一项之所以被抓到，是因为 val_before_train 会先跑一个基座分——
+      有一个已知答案可对照，偏差才会立刻现形。新验证集都应保留这个对照点。
+
+activity_log:
+  - at: "2026-08-20T01:30:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "生成并校验两臂数据，同步 node-B"
+    result: >
+      plan 筛出 84,797 条（N>=8），写出 83,123 训练 + 1,674 留出 x 2 臂。
+      六项一致性校验全过（嵌套、行序、K<N、悬空 Frame-N、占位符、teacher 一致），
+      prompt 长度 student max 3340 / teacher max 6540 均在上限内且与真实 processor 逐行相符。
+      两机 6 个关键文件 md5 一致，node-B 视角缓存抽查 0 缺失。
+  - at: "2026-08-20T01:50:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "两机各跑 2 步 SMOKE=1 冒烟"
+    result: >
+      两臂均通过：teacher_probe 恒定（teacher 冻结）、policy_fallback_fraction 恒 0、
+      answered/frac 1.0、judge 未唤醒、无真实报错。node-B 日志里的两处 Traceback 经查为
+      torch._inductor 在 GC 时的告警与一条被截断的 FX graph cache 条目（自愈），非训练错误。
+      冒烟结束后两机 8 卡显存归 0。
+  - at: "2026-08-20T01:55:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "两机正式启动 300 步（launch_commands 原样执行，lr 5.0e-6）"
+    result: >
+      启动前三道闸均通过：checkpoints/<name> 为空（ISSUE-101）、8 卡显存 < 2GB、8100 端口空闲。
+      max_prompt_length 按用户决策保持 4096（未上调到 5120，因 student 峰值 3,340 已有余量）。
+      两臂 judge 均已就绪并进入 sleep，随后进入 step 0 基座 CV-Bench 生成。
+      node-A PID 4027360 / node-B PID 4132559。
+  - at: "2026-08-20T02:22:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "step 0 基座评测完成 + 前若干步健康检查（node-A step 5 / node-B step 7）"
+    result: >
+      **step 0 基座 CV-Bench combined：khalf 86.21 / kquarter 86.23（本轮池，仅差 0.02pp）。**
+      两臂用同一份 val 文件与同一基座权重，因此这 0.02 就是本轮的跨机基线偏移，远小于上一轮的
+      +0.25，两臂 CV-Bench 可以直接对比（仍建议各自用 step 0 归一化）。
+      与历史 86.96（v1, native 题面）不可并列——题面与训练池都不同。
+      must_watch 逐项：policy_fallback_fraction 恒 0（纯 vopd 分支）、teacher_probe 两机均为
+      0.04456961154937744 且与历史一致（teacher 冻结生效）、self_distillation_mask.mean() 1.0、
+      empty_target_batch 0、answered/frac 1.0 / 0.9989、judge 未唤醒、prompt clip_ratio 0、
+      aborted_ratio 0。K 构成与设计完全一致（half 4/16 档 mean 7.0；quarter 2/8 档 mean 3.03）。
+      **早期 JSD 已分化：khalf 0.0170 vs kquarter 0.0287（同 step 量级差 1.7 倍）**，
+      方向与假设一致（落差越大越难拟合），但这是第 5/7 步、尚未到平台，不能当结论；
+      要看的是 200 步后的平台值与 0.0157 的关系。
+      **待观察**：node-A step 5 的 grad_norm 1.73 已超过 clip_grad=1.0（此时仍在 warmup，
+      lr 仅 2e-6），node-B 为 0.98。若稳态仍顶在 1.0，则实际步长被裁剪吃掉，
+      两臂的有效步长可能不等——这会成为解释两臂差异时的干扰项，必须在 wandb 持续对照。
+  - at: "2026-08-20T11:17:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "用户要求提前终止训练；按 CV-Bench 三区间选点启动 VSI 评测"
+    result: >
+      训练终止：node-A ~250/300、node-B ~267/300。选点（各区间 CV-Bench 最高，不含 step 0）：
+      khalf 45/120/240；kquarter 75/180/255。基座锚点 node-A 单独评测。
+      驱动脚本 scripts/opsd/run_view_ratio_vsi_eval.sh；首次启动因 ~/.local/bin/accelerate
+      遮蔽 sr_opsd 失败，修 PATH 后重跑成功。node-A PID 591470 / node-B PID 518771。
+  - at: "2026-08-20T11:40:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "为 VSI-Bench 建立 spatialstack 协议（1024 token + 自有解析），改为只测全局最佳 checkpoint"
+    result: >
+      用户指出 16 token 太短、首词解析不合理，要求参照 CV-Bench 的经验做自有协议。
+      新增 scripts/opsd/vsibench_scoring.py 与 VSIBENCH_PROTOCOL 开关：生成上限 1024、
+      until 清空、选择题限定在题目实际提供的字母内取答案、数值题取显式答案句或末行数字。
+      **指标一行未改**，回归测试回放 5 个历史 run 新旧打分逐个一致，确认只改了解析位置。
+      同时按用户要求收敛评测范围：只跑 khalf step 120（33 个评测点里 CV-Bench 最高，
+      83.79%），基座锚点在 node-B 并行。
+      过程中的两个坑：`~/.local/bin/accelerate` 会遮蔽 conda 环境里的同名程序；
+      `pkill -f lmms_eval` 会匹配到发起它的 shell 自身而静默失效，须写成 `[l]mms_eval`。
+  - at: "2026-08-20T13:40:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "接入 LLM judge（gpt-oss-120b）并用反向抽查证伪其表面收益；同时完成 vLLM 评测对照"
+    result: >
+      用户要求与 Vision-OPD 保持一致启用 LLM judge。新增
+      scripts/opsd/tools/judge_vsibench.py（复用 eval_visionopd/judge.py 的 prompt 与
+      调用层）与 rejudge_vsibench.sh（照搬 rejudge.sh 的起服务方式，直接对已落盘的
+      sample dump 重打分，不重跑生成）。
+      照搬 Vision-OPD 的 Yes/No 级联：基座 anchor overall 53.40 -> 54.89（+1.49），
+      107 行由错判对、0 行由对判错。加反向抽查（把规则已接受的行也送 judge）后发现
+      judge 会推翻约 10% 的已接受行，与被拒绝行 10.8% 的翻转率几乎相同，
+      即该增益无法与单向施加的 judge 噪声区分。
+      逐条人工核对分歧：并非解析器出错，而是模型字母对、正文自相矛盾
+      （GT=B(left)，正文 "the whiteboard is to the right. B"）——judge 判语义、
+      benchmark 判选项，判据不同。先怀疑是 GT 只传裸字母，补选项文本后分歧率
+      9.7% -> 10.7%，未下降，排除 prompt 因素。
+      改为抽取模式（judge 只回答选了哪个选项，评分仍用 lmms_eval 的 exact match，
+      覆盖全部 2,490 条 MCA）：53.40 -> 53.47，仅 +0.08，翻转 11 对 7 近似对称。
+      结论：规则解析器无需 judge 兜底；judge 保留为定期校验工具，默认 --mca-mode extract。
+      数值题从一开始只用抽取，因为 MRA 是连续值，Yes/No 会把它压成二元准确率。
+      详见 LESSON-019。
+      另：vLLM 评测（scripts/opsd/tools/eval_vsibench_vllm.py）跑完基座全量，
+      16.7 分钟 / 5,130 题（5.13 q/s），overall 52.58，对 HF 的 53.40 低 0.82；
+      截断率 2.18% vs 2.05%、长度分布一致。两套 harness 各自内部可比，
+      但 **不可混表**。
+  - at: "2026-08-20T14:35:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "用 4096 token 重测证明 khalf step 120 是真退化而非预算截断；填入 evaluation.results"
+    result: >
+      khalf step 120 在 1024 预算下 overall 34.82、answered 93.51%、截断 21.07%，
+      解析失败 333 条且形态为重复退化（逐帧枚举 / 连续数数，刷满预算不给答案）。
+      为分离「真退化」与「预算不够」，用 vLLM 把预算放宽到 4096 重跑：
+      overall 33.38（未回升）、answered 仍 93.51%、解析失败仍 333 条、
+      中位长度仍 205 token、截断率 21.07% -> 20.47%。
+      即预算不是约束，原来撞 1024 的那批改撞 4096。
+      同 harness 对比（vLLM）：基座 52.58 -> khalf 33.38，**崩塌约 19 分**。
+      该 checkpoint 恰是两臂 33 个训练内评测点里 CV-Bench 最高的（83.79%），
+      说明单图 MCQ 护栏对 32 帧视频上的重复退化不敏感。
+  - at: "2026-08-20T16:10:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "把训练过程评测换成 VSI-Bench 全量 + vLLM + LLM judge，并做两阶段联调"
+    result: >
+      按用户 2026-08-20 决策落地（详见 evaluation.in_training_next）。
+      新增 scripts/opsd/vsibench_eval_core.py 作为生成/规则打分/judge/错误分类的唯一实现，
+      eval_vsibench_vllm.py 与新的 apply_judge_to_dump.py 都调它，
+      离线评测与训练内评测因此不会打分漂移。
+      编排：run_training_vsibench_eval.sh 单 checkpoint 两阶段（policy 独占 8 卡生成 ->
+      显存归零 -> 起 gpt-oss-120b 只判规则没接受的行 -> 原地重算汇总）；
+      watch_training_vsibench_eval.sh 轮询新 checkpoint 自动评测。
+      watch 脚本三处加固：按 step 数字排序（否则 step_100 会排在 step_45 前）、
+      要求分片齐全且目录静默 60 秒才动手（避免读到写了一半的 checkpoint）、
+      失败打 FAILED 标记不再无限重试。
+      run_training_vsibench_eval.sh 的 cleanup 收窄为只杀 judge 自己的进程组，
+      原先的 `pkill -f VLLM::EngineCore` 会连同机训练任务的 rollout 引擎一起杀掉。
+      联调（基座 4 场景 35 题，JUDGE=1）通过；过程中修掉 ISSUE-201、ISSUE-202。
+      诊断口径同时修正：数值题 MRA 只要 >0 原先都算 correct，
+      导致 object_counting 平均分 40 却报「3 题全对」；新增 partial_error 档区分半对与全对。

@@ -198,6 +198,10 @@ trainer:
   # Maximum number of actor checkpoints to keep
   max_actor_ckpt_to_keep: null
 
+  # recency: FIFO newest-K (default). best: keep historically highest-K by ckpt_keep_metric
+  ckpt_keep_mode: recency
+  ckpt_keep_metric: val-core/vsibench/overall/acc
+
   # Maximum number of critic checkpoints to keep
   max_critic_ckpt_to_keep: null
 

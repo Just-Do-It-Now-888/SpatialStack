@@ -50,6 +50,9 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+from verl.trainer.ppo.cvbench_metrics import compute_cvbench_metrics
+from verl.trainer.ppo.mindcube_metrics import compute_mindcube_metrics
+from verl.trainer.ppo.vsibench_metrics import compute_vsibench_metrics
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -58,6 +61,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.sample_provenance import compute_sample_provenance_metrics, extract_provenance
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
@@ -67,6 +71,13 @@ from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.metric import reduce_metrics
+from verl.utils.opsd_answer_hint import (
+    DEFAULT_ANSWER_HINT_TEMPLATE,
+    assert_equal_view_counts,
+    count_images_in_messages,
+    prepare_opsd_teacher_messages,
+    resolve_ground_truth_answer,
+)
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -541,6 +552,11 @@ class RayPPOTrainer:
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
 
+            # Which rows this step consumed. _dump_generations keeps any column
+            # whose length matches the batch, so these ride along as extra JSONL
+            # keys without touching its signature.
+            reward_extra_infos_to_dump.update(extract_provenance(batch))
+
             self._dump_generations(
                 inputs=inputs,
                 outputs=outputs,
@@ -808,18 +824,7 @@ class RayPPOTrainer:
         answer: str,
         hint_template: str,
     ) -> list[dict]:
-        teacher_messages = deepcopy(raw_prompt_messages)
-        last_msg = teacher_messages[-1]
-        content = last_msg["content"]
-        hint_suffix = hint_template.format(answer=answer)
-
-        if isinstance(content, list):
-            teacher_messages[-1]["content"] = list(content) + [{"type": "text", "text": hint_suffix}]
-        elif isinstance(content, str):
-            teacher_messages[-1]["content"] = content + hint_suffix
-        else:
-            raise TypeError(f"Unsupported message content type: {type(content)}")
-        return teacher_messages
+        return prepare_opsd_teacher_messages(raw_prompt_messages, answer, hint_template)
 
     @staticmethod
     def _extract_images_from_messages(messages: list[dict]) -> list[Image.Image]:
@@ -969,6 +974,28 @@ class RayPPOTrainer:
         )
         return torch.cat((text_position_ids, prompt_position_ids), dim=0)
 
+    def _teacher_apply_chat_template_kwargs(self) -> dict:
+        """Chat-template kwargs for the teacher prompt.
+
+        Same as the student's except for `enable_thinking`, which
+        `actor.self_distillation.teacher_enable_thinking` may override. On Qwen3
+        templates the flag decides what the generation prompt ends with:
+        `enable_thinking=False` closes the reasoning block up front
+        (`<think>\\n\\n</think>\\n\\n`), True leaves it open (`<think>\\n`). The
+        teacher is never sampled -- it only scores the student's tokens -- so
+        turning it on means the teacher's targets are its reasoning-mode
+        distribution while the student writes in answer mode. That asymmetry is
+        the point of the knob, not a side effect, so it stays null (inherit)
+        unless a config asks for it.
+        """
+        apply_kwargs = dict(self.config.data.apply_chat_template_kwargs or {})
+        self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        if self_distillation_cfg is not None:
+            teacher_enable_thinking = self_distillation_cfg.get("teacher_enable_thinking", None)
+            if teacher_enable_thinking is not None:
+                apply_kwargs["enable_thinking"] = bool(teacher_enable_thinking)
+        return apply_kwargs
+
     def _build_teacher_prompt_inputs(
         self,
         messages: list[dict],
@@ -976,7 +1003,7 @@ class RayPPOTrainer:
         response_mask: torch.Tensor,
         max_prompt_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[dict[str, torch.Tensor]]]:
-        apply_kwargs = dict(self.config.data.apply_chat_template_kwargs or {})
+        apply_kwargs = self._teacher_apply_chat_template_kwargs()
         processing_class = self.processor or self.tokenizer
         raw_prompt = processing_class.apply_chat_template(
             messages,
@@ -1001,6 +1028,13 @@ class RayPPOTrainer:
             teacher_multi_modal_inputs = model_inputs.copy()
             prompt_input_ids = teacher_multi_modal_inputs.pop("input_ids").squeeze(0)
             prompt_attention_mask = teacher_multi_modal_inputs.pop("attention_mask").squeeze(0)
+            from verl.utils.qwen35_geometry import attach_geometry_encoder_inputs
+
+            attach_geometry_encoder_inputs(
+                teacher_multi_modal_inputs,
+                prompt_images,
+                config=getattr(processing_class, "config", None),
+            )
 
             if hasattr(self.processor, "get_rope_index"):
                 processor_model_type = getattr(getattr(self.processor, "config", None), "model_type", None)
@@ -1075,6 +1109,7 @@ class RayPPOTrainer:
                 max_length=max_prompt_len,
                 padding=False,
                 truncation=True,
+                **apply_kwargs,
             )
             prompt_input_ids = teacher_prompt["input_ids"].squeeze(0)
             prompt_attention_mask = teacher_prompt["attention_mask"].squeeze(0)
@@ -1168,9 +1203,9 @@ class RayPPOTrainer:
         if use_opsd_answer_hint:
             answer_hint_template = self_distillation_cfg.get(
                 "answer_hint_template",
-                "\n\nHere is a reference solution to this problem:\n{answer}\n\n"
-                "After understanding the reference solution, please try to solve this problem using your own approach below:\n",
+                DEFAULT_ANSWER_HINT_TEMPLATE,
             )
+            fallback_to_policy_loss = self_distillation_cfg.get("fallback_to_policy_loss_on_missing_teacher", False)
 
             teacher_input_ids_list = []
             teacher_attention_mask_list = []
@@ -1188,18 +1223,19 @@ class RayPPOTrainer:
                 )
 
                 reward_model_info = batch.non_tensor_batch.get("reward_model", [None] * batch_size)
-                answer = None
-                if reward_model_info[i] is not None and isinstance(reward_model_info[i], dict):
-                    answer = reward_model_info[i].get("ground_truth", None)
-                if answer is None:
-                    extra_info = batch.non_tensor_batch.get("extra_info", [None] * batch_size)
-                    if extra_info[i] is not None and isinstance(extra_info[i], dict):
-                        answer = extra_info[i].get("answer", None)
-
-                has_answer = answer is not None and str(answer).strip() != ""
+                extra_info = batch.non_tensor_batch.get("extra_info", [None] * batch_size)
+                answer = resolve_ground_truth_answer(reward_model_info[i], extra_info[i])
+                has_answer = answer is not None
                 teacher_present_mask_list.append(1.0 if has_answer else 0.0)
 
                 if not has_answer:
+                    if not fallback_to_policy_loss:
+                        uid = batch.non_tensor_batch["uid"][i] if "uid" in batch.non_tensor_batch else None
+                        raise ValueError(
+                            "answer_hint teacher is missing ground_truth and "
+                            "fallback_to_policy_loss_on_missing_teacher=False. "
+                            f"sample_idx={i}, uid={uid}"
+                        )
                     answer = ""
 
                 raw_prompt_messages = list(batch.non_tensor_batch["raw_prompt"][i])
@@ -1207,6 +1243,12 @@ class RayPPOTrainer:
                     raw_prompt_messages,
                     str(answer),
                     answer_hint_template,
+                )
+                assert_equal_view_counts(
+                    extra_info[i],
+                    count_images_in_messages(raw_prompt_messages),
+                    count_images_in_messages(teacher_messages),
+                    sample_idx=i,
                 )
 
                 (
@@ -1451,7 +1493,8 @@ class RayPPOTrainer:
 
 
         messages = [_build_teacher_message(i) for i in range(batch_size)]
-        enable_thinking = self.config.data.apply_chat_template_kwargs.get("enable_thinking", True) if self.config.data.apply_chat_template_kwargs else True
+        apply_kwargs = self._teacher_apply_chat_template_kwargs()
+        apply_kwargs.setdefault("enable_thinking", True)
         teacher_prompt = self.tokenizer.apply_chat_template(
             messages,
             tokenize=True,
@@ -1459,10 +1502,10 @@ class RayPPOTrainer:
             return_dict=True,
             continue_final_message=False,
             add_generation_prompt=True,
-            enable_thinking=enable_thinking,
             max_length=self_distillation_cfg.max_reprompt_len,
             padding=True,
             truncation=True,
+            **apply_kwargs,
         )
         teacher_input_ids = torch.cat([teacher_prompt["input_ids"].to(device), responses], dim=1)
         teacher_attention_mask = torch.cat([teacher_prompt["attention_mask"].to(device), response_mask], dim=1)
@@ -1530,6 +1573,43 @@ class RayPPOTrainer:
 
         return gen_batch
 
+    @staticmethod
+    def _response_token_lengths(gen_batch: DataProto) -> list[float]:
+        """Per-row generated length in tokens, padding excluded."""
+        responses = gen_batch.batch["responses"]
+        if "attention_mask" in gen_batch.batch:
+            mask = gen_batch.batch["attention_mask"][:, -responses.size(1) :]
+        elif "response_mask" in gen_batch.batch:
+            mask = gen_batch.batch["response_mask"]
+        else:
+            return [float(responses.size(1))] * responses.size(0)
+        return mask.sum(-1).float().cpu().tolist()
+
+    @staticmethod
+    def _validation_response_length_cap(config) -> int | None:
+        """Response token budget used during in-loop validation."""
+        if config is None:
+            return None
+        rollout = config.actor_rollout_ref.rollout
+        val_kwargs = rollout.get("val_kwargs") or {}
+        cap = val_kwargs.get("response_length")
+        if cap is not None:
+            return int(cap)
+        cap = rollout.get("response_length")
+        if cap is not None:
+            return int(cap)
+        data_cap = config.data.get("max_response_length")
+        return int(data_cap) if data_cap is not None else None
+
+    @staticmethod
+    def _tracker_metrics(metrics: dict) -> dict:
+        """Metrics sent to wandb and other experiment trackers.
+
+        In-training validation is rule-only by default; judge-tier aux series stay
+        in stdout for JUDGE=1 debugging but are not published to dashboards.
+        """
+        return {key: value for key, value in metrics.items() if "/judge/" not in key and "rule_only" not in key}
+
     def _validate(self, merged: bool = False):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
@@ -1538,6 +1618,7 @@ class RayPPOTrainer:
         sample_inputs = []
         sample_outputs = []
         sample_gts = []
+        sample_extra_infos = []
         sample_scores = []
         sample_turns = []
         sample_uids = []
@@ -1597,6 +1678,16 @@ class RayPPOTrainer:
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
 
+            # Response length in tokens, the same quantity the training curve
+            # reports as response_length/mean. The reward function's resp_chars
+            # is a decoded-character count, so without this a validation pass
+            # has no length series comparable to the training rollouts -- and
+            # length is what moves first when the model slides into repetition
+            # (LESSON-020).
+            reward_extra_infos_dict["resp_tokens"].extend(
+                self._response_token_lengths(test_output_gen_batch)
+            )
+
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
 
@@ -1606,6 +1697,7 @@ class RayPPOTrainer:
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             sample_inputs.extend(input_texts)
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
+            sample_extra_infos.extend(test_batch.non_tensor_batch.get("extra_info", [None] * len(input_texts)))
 
             # evaluate using reward_function
             result = self._compute_or_extract_reward(test_batch, reward_fn=self.val_reward_fn, return_dict=True)
@@ -1628,6 +1720,15 @@ class RayPPOTrainer:
                 sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
+
+        judge_metrics = self._maybe_judge_validation(
+            inputs=sample_inputs,
+            outputs=sample_outputs,
+            gts=sample_gts,
+            data_sources=data_source_lst,
+            reward_extra_infos_dict=reward_extra_infos_dict,
+            extra_infos=sample_extra_infos,
+        )
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -1655,7 +1756,491 @@ class RayPPOTrainer:
                 "reward_extra_infos_dict": reward_extra_infos_dict,
             }
         data_sources = np.concatenate(data_source_lst, axis=0)
-        return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
+        metric_dict = self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
+        metric_dict.update(judge_metrics)
+        return metric_dict
+
+    @staticmethod
+    def _load_opsd_module(name):
+        """Import scripts/opsd/<name>.py, whether or not the repo root is importable.
+
+        run_mvopsd.sh puts the repo root on PYTHONPATH, but a bare
+        `python -m verl.trainer.main_ppo` does not, and the reward file is
+        normally loaded by path rather than imported.
+        """
+        try:
+            return __import__(f"scripts.opsd.{name}", fromlist=[name])
+        except ImportError:
+            import importlib.util
+            import os
+
+            here = os.path.dirname(os.path.abspath(__file__))
+            repo_root = os.path.abspath(os.path.join(here, "..", "..", "..", ".."))
+            spec = importlib.util.spec_from_file_location(
+                name, os.path.join(repo_root, "scripts", "opsd", f"{name}.py")
+            )
+            if spec is None or spec.loader is None:
+                return None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+    def _get_validation_judge(self):
+        """Build the judge client once, or return None when it is not configured."""
+        if hasattr(self, "_validation_judge"):
+            return self._validation_judge
+
+        self._validation_judge = None
+        cfg = self.config.trainer.get("validation_judge", None)
+        if cfg is None or not cfg.get("enable", False):
+            return None
+        module = self._load_opsd_module("mvopsd_judge")
+        if module is None:
+            print("validation judge: cannot locate scripts/opsd/mvopsd_judge.py; staying rule-only")
+            return None
+        ValidationJudge = module.ValidationJudge
+
+        try:
+            self._validation_judge = ValidationJudge(
+                api_base=cfg.get("api_base"),
+                model=cfg.get("model", "judge"),
+                max_tokens=cfg.get("max_tokens", 2048),
+                parallel_workers=cfg.get("parallel_workers", 256),
+                min_rows=cfg.get("min_rows", 16),
+                sleep_level=cfg.get("sleep_level", 1),
+                reasoning_effort=cfg.get("reasoning_effort", ""),
+            )
+            self._validation_judge_audit = bool(cfg.get("audit_all_rows", False))
+            self._validation_judge_mode = str(cfg.get("mode", "extract"))
+            self._validation_judge_trust_boxed = bool(cfg.get("trust_boxed", False))
+            self._validation_judge_trust_terse = bool(cfg.get("trust_terse", False))
+            self._validation_judge_trust_mca_tail = bool(cfg.get("trust_mca_tail", False))
+        except Exception as exc:  # noqa: BLE001 - never let judge setup stop training
+            print(f"validation judge: disabled, construction failed: {exc}")
+            self._validation_judge = None
+        return self._validation_judge
+
+    def _judge_vsibench_rows(
+        self, inputs, outputs, gts, flat_sources, n, accuracies, answered, judge, extra_infos=None
+    ) -> dict:
+        """Second grading tier for the VSI-Bench validation rows.
+
+        Mirrors `scripts/opsd/vsibench_eval_core.py` at its default scope, so the
+        in-training curve and the offline report are the same measurement. Only
+        rows the rule tier could not *read* are sent:
+
+        * multiple choice -- no option letter could be extracted; the judge is
+          asked the Vision-OPD Yes/No question.
+        * numerical -- no number could be extracted; the judge is asked for the
+          number and the MRA metric is applied here. A Yes/No verdict would
+          flatten MRA into a binary accuracy still labelled MRA (LESSON-019).
+
+        A letter the parser read and scored wrong is a wrong answer, not an
+        unresolved one, so it does not come here. That keeps this tier near-free
+        on a healthy model and stops it from inflating the score: because only
+        unread rows are eligible, the judge can raise the number but never lower
+        it, and widening the scope is how a +1.5 appeared on the base model that
+        a reverse audit could not distinguish from judge noise.
+
+        `val-core/vsibench/rule_only/acc` is reported next to the judged score so
+        the one-sided tier is always visible rather than baked in.
+        """
+        reward = self._load_opsd_module("mvopsd_reward")
+        if reward is None:
+            return {}
+        VSIBENCH_MCA_TYPES = reward.VSIBENCH_MCA_TYPES
+        VSIBENCH_NA_TYPES = reward.VSIBENCH_NA_TYPES
+
+        prefix = "vsibench/"
+        strict = getattr(self, "_validation_judge_mode", "extract") == "extract"
+        trust_boxed = bool(getattr(self, "_validation_judge_trust_boxed", False))
+        trust_terse = bool(getattr(self, "_validation_judge_trust_terse", False))
+        trust_mca_tail = bool(getattr(self, "_validation_judge_trust_mca_tail", False))
+        mca, na, vsi_rows = [], [], []
+        boxed_rows = 0
+        terse_rows = 0
+        mca_tail_rows = 0
+        extra_infos = extra_infos or []
+        for i in range(n):
+            if not flat_sources[i].startswith(prefix):
+                continue
+            vsi_rows.append(i)
+            # A closed \boxed{} is the answer the prompt asked for, and the reward
+            # tier has already scored it from inside the box. Re-reading the whole
+            # response with the judge could only overwrite that with something
+            # read from the surrounding reasoning, so these rows are already
+            # resolved. Rows with no box still go to the judge -- that is the
+            # fallback half of the boxed-primary decision.
+            if trust_boxed and reward.extract_boxed(outputs[i]) is not None:
+                boxed_rows += 1
+                continue
+            # A whole-string number or option letter is equally unambiguous: the
+            # rule tier has already read it from the only token(s) present, and
+            # asking the judge to re-extract from "173" mostly yields NONE.
+            if trust_terse and reward.is_terse_answer(outputs[i]):
+                terse_rows += 1
+                continue
+            if trust_mca_tail:
+                question_type = flat_sources[i][len(prefix) :]
+                if question_type in VSIBENCH_MCA_TYPES:
+                    options = reward._vsibench_options(extra_infos[i] if i < len(extra_infos) else None)
+                    if reward.is_trustable_mca_tail(outputs[i], options):
+                        mca_tail_rows += 1
+                        continue
+            # Strict mode grades every row; the cascade only grades the ones the
+            # rules could not read.
+            if not strict and float(answered[i]) != 0.0:
+                continue
+            question_type = flat_sources[i][len(prefix) :]
+            if question_type in VSIBENCH_MCA_TYPES:
+                mca.append(i)
+            elif question_type in VSIBENCH_NA_TYPES:
+                na.append(i)
+
+        if not vsi_rows:
+            return {}
+
+        if strict:
+            metrics = self._judge_vsibench_strict(
+                inputs, outputs, gts, flat_sources, vsi_rows, mca, na, accuracies, answered, judge, reward
+            )
+            if trust_boxed or trust_terse or trust_mca_tail:
+                # How much of the reported number came from boxes or terse answers
+                # rather than from the judge. If compliance collapses mid-run the
+                # score silently changes tier, so this has to be on the dashboard.
+                trusted = boxed_rows + terse_rows + mca_tail_rows
+                metrics["val-aux/vsibench/judge/boxed_trusted"] = boxed_rows
+                metrics["val-aux/vsibench/judge/terse_trusted"] = terse_rows
+                metrics["val-aux/vsibench/judge/mca_tail_trusted"] = mca_tail_rows
+                metrics["val-aux/vsibench/judge/rule_trusted"] = trusted
+                metrics["val-aux/vsibench/boxed/frac"] = boxed_rows / max(len(vsi_rows), 1)
+                metrics["val-aux/vsibench/terse/frac"] = terse_rows / max(len(vsi_rows), 1)
+                metrics["val-aux/vsibench/mca_tail/frac"] = mca_tail_rows / max(len(vsi_rows), 1)
+                metrics["val-aux/vsibench/rule_trusted/frac"] = trusted / max(len(vsi_rows), 1)
+            return metrics
+
+        pending = mca + na
+        metrics = {
+            # Snapshot before the judge touches anything, so the judged score can
+            # never be mistaken for the unassisted one.
+            "val-core/vsibench/rule_only/acc": compute_vsibench_metrics(
+                [flat_sources[i] for i in vsi_rows],
+                [accuracies[i] for i in vsi_rows],
+            ).get("val-core/vsibench/overall/acc"),
+            "val-aux/vsibench/judge/pending": len(pending),
+            "val-aux/vsibench/judge/pending_mca": len(mca),
+            "val-aux/vsibench/judge/pending_na": len(na),
+            "val-aux/vsibench/judge/woken": 0.0,
+        }
+        if trust_boxed or trust_terse or trust_mca_tail:
+            trusted = boxed_rows + terse_rows + mca_tail_rows
+            metrics["val-aux/vsibench/judge/boxed_trusted"] = boxed_rows
+            metrics["val-aux/vsibench/judge/terse_trusted"] = terse_rows
+            metrics["val-aux/vsibench/judge/mca_tail_trusted"] = mca_tail_rows
+            metrics["val-aux/vsibench/judge/rule_trusted"] = trusted
+            metrics["val-aux/vsibench/boxed/frac"] = boxed_rows / max(len(vsi_rows), 1)
+            metrics["val-aux/vsibench/terse/frac"] = terse_rows / max(len(vsi_rows), 1)
+            metrics["val-aux/vsibench/mca_tail/frac"] = mca_tail_rows / max(len(vsi_rows), 1)
+            metrics["val-aux/vsibench/rule_trusted/frac"] = trusted / max(len(vsi_rows), 1)
+        if not pending or len(pending) < judge.min_rows:
+            return metrics
+
+        print(
+            f"validation judge: waking for {len(mca)} VSI multiple-choice + {len(na)} numerical "
+            f"rows the rules could not read"
+        )
+        woke = False
+        try:
+            woke = judge.wake()
+            if not woke:
+                print("validation judge: could not wake; keeping rule scores for VSI-Bench")
+                return metrics
+
+            recovered = 0
+            seconds = 0.0
+            if mca:
+                verdicts, stats = judge.grade(
+                    questions=[inputs[i] for i in mca],
+                    ground_truths=[gts[i] for i in mca],
+                    responses=[outputs[i] for i in mca],
+                )
+                seconds += stats["seconds"]
+                for index, verdict in zip(mca, verdicts):
+                    if verdict is None:
+                        continue
+                    # The row is now resolved either way; only a "yes" changes
+                    # the score, and it can only go up from the rule's zero.
+                    answered[index] = 1.0
+                    if verdict > float(accuracies[index]):
+                        accuracies[index] = verdict
+                        recovered += 1
+                metrics["val-aux/vsibench/judge/mca_unparsed"] = stats["unparsed"]
+            if na:
+                numbers, stats = judge.extract_numbers(
+                    questions=[inputs[i] for i in na],
+                    responses=[outputs[i] for i in na],
+                )
+                seconds += stats["seconds"]
+                for index, number in zip(na, numbers):
+                    if number is None:
+                        continue
+                    target = reward._to_float(str(gts[index]))
+                    if target is None:
+                        continue
+                    score = reward._mean_relative_accuracy(number, target)
+                    answered[index] = 1.0
+                    if score > float(accuracies[index]):
+                        accuracies[index] = score
+                        recovered += 1
+                metrics["val-aux/vsibench/judge/na_no_number"] = stats["none"]
+
+            metrics.update(
+                {
+                    "val-aux/vsibench/judge/woken": 1.0,
+                    "val-aux/vsibench/judge/recovered": recovered,
+                    "val-aux/vsibench/judge/seconds": seconds,
+                }
+            )
+            print(
+                f"validation judge: VSI-Bench recovered {recovered}/{len(pending)} rows in {seconds:.0f}s"
+            )
+        except Exception as exc:  # noqa: BLE001 - validation must not break training
+            print(f"validation judge: VSI-Bench pass failed, keeping rule scores: {exc}")
+        finally:
+            if woke:
+                judge.sleep()
+        return metrics
+
+    def _judge_vsibench_strict(
+        self, inputs, outputs, gts, flat_sources, vsi_rows, mca, na, accuracies, answered, judge, reward
+    ) -> dict:
+        """Extract-only grading of every VSI-Bench row; the judge's answer is the score.
+
+        Default since 2026-08-23 (user decision, after reviewing rule/judge
+        disagreements by hand). The rule tier stays reported as
+        `val-core/vsibench/rule_only/acc`, but it is a diagnostic: on a degraded
+        model it reads frame indices out of `Image N:` enumerations and scores
+        them as full marks, so it is an upper bound rather than the result. On
+        the llava_hound step-100 dump the two tiers were 23.00 (rules) and 7.37
+        (this one) over the same 5,130 responses.
+
+        Unlike the cascade this tier can *lower* a score, which is the whole
+        reason for it. Both directions are counted so a step where the judge
+        rewrites many rows is visible rather than silent.
+
+        Cost: every row is one judge call. The offline equivalent took 12-13 min
+        for 5,130 rows, on top of ~18 min of generation.
+        """
+        rule_only = compute_vsibench_metrics(
+            [flat_sources[i] for i in vsi_rows],
+            [accuracies[i] for i in vsi_rows],
+        ).get("val-core/vsibench/overall/acc")
+        pending = mca + na
+        metrics = {
+            "val-core/vsibench/rule_only/acc": rule_only,
+            "val-aux/vsibench/judge/strict": 1.0,
+            "val-aux/vsibench/judge/pending": len(pending),
+            "val-aux/vsibench/judge/pending_mca": len(mca),
+            "val-aux/vsibench/judge/pending_na": len(na),
+            "val-aux/vsibench/judge/woken": 0.0,
+        }
+        if not pending:
+            return metrics
+
+        print(f"validation judge (strict extract): grading all {len(pending)} VSI-Bench rows")
+        woke = False
+        try:
+            woke = judge.wake()
+            if not woke:
+                # The reported number would silently revert to the rule tier,
+                # which is a different measurement, so say so loudly.
+                print(
+                    "validation judge: could not wake; VSI-Bench falls back to RULE scores "
+                    "-- this point is not comparable to strict-tier points"
+                )
+                metrics["val-aux/vsibench/judge/fellback_to_rules"] = 1.0
+                return metrics
+
+            kinds = ["mca"] * len(mca) + ["na"] * len(na)
+            order = mca + na
+            answers, stats = judge.extract_answers(
+                questions=[inputs[i] for i in order],
+                responses=[outputs[i] for i in order],
+                kinds=kinds,
+            )
+
+            raised = lowered = 0
+            for index, (kind, value) in zip(order, answers):
+                previous = float(accuracies[index])
+                if value is None:
+                    score, resolved = 0.0, 0.0
+                elif kind == "mca":
+                    score = 1.0 if str(value).upper() == str(gts[index]).strip().upper() else 0.0
+                    resolved = 1.0
+                else:
+                    target = reward._to_float(str(gts[index]))
+                    if target is None:
+                        continue
+                    score = reward._mean_relative_accuracy(value, target)
+                    resolved = 1.0
+                accuracies[index] = score
+                answered[index] = resolved
+                if score > previous:
+                    raised += 1
+                elif score < previous:
+                    lowered += 1
+
+            metrics.update(
+                {
+                    "val-aux/vsibench/judge/woken": 1.0,
+                    "val-aux/vsibench/judge/graded": stats["found"],
+                    "val-aux/vsibench/judge/none": stats["none"],
+                    "val-aux/vsibench/judge/errors": stats["errors"],
+                    "val-aux/vsibench/judge/raised": raised,
+                    "val-aux/vsibench/judge/lowered": lowered,
+                    "val-aux/vsibench/judge/seconds": stats["seconds"],
+                }
+            )
+            print(
+                f"validation judge (strict): answered {stats['found']}/{len(pending)}, "
+                f"raised {raised}, lowered {lowered}, api errors {stats['errors']}, "
+                f"{stats['seconds']:.0f}s (rule tier was {rule_only:.4f})"
+            )
+        except Exception as exc:  # noqa: BLE001 - validation must not break training
+            print(
+                f"validation judge: strict VSI-Bench pass failed, keeping RULE scores "
+                f"(not comparable to strict points): {exc}"
+            )
+            metrics["val-aux/vsibench/judge/fellback_to_rules"] = 1.0
+        finally:
+            if woke:
+                judge.sleep()
+        return metrics
+
+    def _maybe_judge_validation(
+        self, inputs, outputs, gts, data_sources, reward_extra_infos_dict, extra_infos=None
+    ) -> dict:
+        """Re-score the validation rows the rule tier could not resolve.
+
+        The policy and the judge are both too large to sit on these cards at
+        once, so they take turns. verl already provides the turn: the agent loop
+        sleeps the rollout engines once generation is done and wakes them at the
+        start of the next call, so by the time this runs the cards are free and
+        nothing here has to sleep or resume the policy. The judge only has to
+        wake, grade, and go back to sleep inside that window.
+
+        The judge is only woken when there is enough to grade, which in a
+        healthy run is never -- the in-training prompt asks for a bare option
+        letter and the rules read it. It wakes when the model stops answering
+        in that form, which is the case the rule score cannot measure and the
+        one that voided MV-OPSD v0's benchmarks (LESSON-011).
+
+        Every failure here is swallowed. Falling back to the rule score costs a
+        metric; raising would cost the training run.
+        """
+        judge = self._get_validation_judge()
+        if judge is None:
+            return {}
+
+        accuracies = reward_extra_infos_dict.get("acc")
+        answered = reward_extra_infos_dict.get("answered")
+        if not accuracies or not answered:
+            return {}
+
+        flat_sources = [str(source) for chunk in data_sources for source in chunk]
+        n = min(len(flat_sources), len(accuracies), len(answered), len(outputs), len(gts), len(inputs))
+        metrics = self._judge_vsibench_rows(
+            inputs, outputs, gts, flat_sources, n, accuracies, answered, judge, extra_infos=extra_infos
+        )
+        cvbench = [i for i in range(n) if flat_sources[i].startswith("cvbench/")]
+        if not cvbench:
+            return metrics
+        # Only rows the rules could not read may have their score replaced; that
+        # tiering is the offline protocol's. Audit mode widens what gets *sent*
+        # so the judge can be compared against the rule tier, not what gets
+        # overwritten -- otherwise the audit would silently become the score.
+        overridable = {i for i in cvbench if float(answered[i]) == 0.0}
+        pending = cvbench if getattr(self, "_validation_judge_audit", False) else sorted(overridable)
+
+        metrics.update(
+            {
+                "val-aux/cvbench/judge/pending": len(pending),
+                "val-aux/cvbench/judge/woken": 0.0,
+            }
+        )
+        if not pending or len(pending) < judge.min_rows:
+            # Not worth paging in 61 GB of weights; the rule verdict stands and
+            # answered/frac already reports that these rows went unresolved.
+            return metrics
+
+        print(
+            f"validation judge: waking to grade {len(pending)} rows "
+            f"({len(overridable)} unresolved by the rules)"
+        )
+        woke = False
+        try:
+            # The policy's memory is already free: AgentLoopManager.generate_sequences
+            # sleeps the rollout engines as its last step and wakes them again at the
+            # top of the next call, so validation ends with the cards mostly empty and
+            # training resumes without anything here handing them back. Sleeping them
+            # a second time from this side is not a harmless precaution -- it walks a
+            # level-2 sleep over weights that are already gone and dies in
+            # `buffer.cpu()` with CUDA "invalid argument".
+            woke = judge.wake()
+            if not woke:
+                print("validation judge: could not wake; keeping rule scores")
+                return metrics
+
+            verdicts, stats = judge.grade(
+                questions=[inputs[i] for i in pending],
+                ground_truths=[gts[i] for i in pending],
+                responses=[outputs[i] for i in pending],
+            )
+            overridden = 0
+            audited = 0
+            disagreed = 0
+            for index, verdict in zip(pending, verdicts):
+                if verdict is None:
+                    continue
+                if index in overridable:
+                    accuracies[index] = verdict
+                    overridden += 1
+                else:
+                    audited += 1
+                    disagreed += int(verdict != float(accuracies[index]))
+
+            metrics.update(
+                {
+                    "val-aux/cvbench/judge/woken": 1.0,
+                    "val-aux/cvbench/judge/graded": overridden,
+                    "val-aux/cvbench/judge/yes": stats["yes"],
+                    "val-aux/cvbench/judge/unparsed": stats["unparsed"],
+                    "val-aux/cvbench/judge/seconds": stats["seconds"],
+                }
+            )
+            print(
+                f"validation judge: graded {overridden}/{len(pending)} rows in "
+                f"{stats['seconds']:.0f}s (yes={stats['yes']} no={stats['no']} "
+                f"unreadable={stats['unparsed']})"
+            )
+            if audited:
+                # How far the cheap tier is from the expensive one. A rule
+                # parser can only be trusted against an independent grader,
+                # which is the check v0 never ran (LESSON-011).
+                metrics["val-aux/cvbench/judge/audited"] = audited
+                metrics["val-aux/cvbench/judge/rule_disagree_frac"] = disagreed / audited
+                print(
+                    f"validation judge: audited {audited} rule-scored rows, "
+                    f"{disagreed} disagreements ({disagreed / audited:.1%}); scores unchanged"
+                )
+        except Exception as exc:  # noqa: BLE001 - validation must not break training
+            print(f"validation judge: failed, keeping rule scores: {exc}")
+        finally:
+            if woke:
+                # Must happen even on failure, or the policy cannot get the
+                # memory back and the next rollout dies instead of this metric.
+                judge.sleep()
+        return metrics
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
@@ -1681,6 +2266,45 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/min"] = sample_turns.min()
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+
+        # Per-data_source means alone cannot express either benchmark's
+        # published score: CV-Bench weights 2D and 3D equally rather than by row
+        # count, and VSI-Bench takes an unweighted mean over question types.
+        # MindCube's own score *is* the plain mean, but it is spread over five
+        # data_source buckets, so the roll-up is what puts it on one key next to
+        # the 46.86 / 74.48 / 69.81 anchors -- and it keeps the full-view and
+        # single-view budgets in separate namespaces so they cannot be summed.
+        # All three return {} when the validation set holds none of their rows, so
+        # a mixed or single-benchmark val file is safe either way.
+        if "acc" in reward_extra_infos_dict:
+            metric_dict.update(
+                compute_mindcube_metrics(
+                    data_sources,
+                    reward_extra_infos_dict["acc"],
+                    reward_extra_infos_dict.get("answered"),
+                    reward_extra_infos_dict.get("resp_chars"),
+                    reward_extra_infos_dict.get("resp_tokens"),
+                )
+            )
+            metric_dict.update(
+                compute_cvbench_metrics(
+                    data_sources,
+                    reward_extra_infos_dict["acc"],
+                    reward_extra_infos_dict.get("answered"),
+                )
+            )
+            metric_dict.update(
+                compute_vsibench_metrics(
+                    data_sources,
+                    reward_extra_infos_dict["acc"],
+                    reward_extra_infos_dict.get("answered"),
+                    reward_extra_infos_dict.get("resp_chars"),
+                    reward_extra_infos_dict.get("resp_tokens"),
+                    max_response_tokens=RayPPOTrainer._validation_response_length_cap(
+                        getattr(self, "config", None)
+                    ),
+                )
+            )
 
         return metric_dict
 
@@ -1895,7 +2519,7 @@ class RayPPOTrainer:
             rm_resource_pool=rm_resource_pool,
         )
 
-    def _save_checkpoint(self):
+    def _save_checkpoint(self, val_metrics=None):
         from verl.utils.fs import local_mkdir_safe
 
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -1918,11 +2542,15 @@ class RayPPOTrainer:
                 "Warning: remove_previous_ckpt_in_save is deprecated,"
                 + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
             )
-        max_actor_ckpt_to_keep = (
-            self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
+        ckpt_keep_mode = str(self.config.trainer.get("ckpt_keep_mode", "recency") or "recency")
+        # Best-score retention is applied after a successful save. Disable FIFO
+        # rotation in the FSDP workers so the two policies cannot fight.
+        fifo_keep = None if ckpt_keep_mode == "best" else self.config.trainer.get("max_actor_ckpt_to_keep", None)
+        max_actor_ckpt_to_keep = fifo_keep if not remove_previous_ckpt_in_save else 1
         max_critic_ckpt_to_keep = (
-            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+            (None if ckpt_keep_mode == "best" else self.config.trainer.get("max_critic_ckpt_to_keep", None))
+            if not remove_previous_ckpt_in_save
+            else 1
         )
 
         self.actor_rollout_wg.save_checkpoint(
@@ -1957,12 +2585,47 @@ class RayPPOTrainer:
             and self.config.actor_rollout_ref.actor.checkpoint["async_save"]
         ):
             print("skip write latest_checkpointed_iteration.txt when async_save is True")
-            return
+            return {}
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+        return self._maybe_prune_best_checkpoints(val_metrics)
+
+    def _maybe_prune_best_checkpoints(self, val_metrics=None):
+        ckpt_keep_mode = str(self.config.trainer.get("ckpt_keep_mode", "recency") or "recency")
+        if ckpt_keep_mode != "best":
+            return {}
+        from verl.utils.checkpoint.best_ckpt_retention import apply_best_retention
+
+        metric_key = str(
+            self.config.trainer.get("ckpt_keep_metric", "val-core/vsibench/overall/acc")
+            or "val-core/vsibench/overall/acc"
+        )
+        max_to_keep = self.config.trainer.get("max_actor_ckpt_to_keep", None)
+        score = None
+        if val_metrics and metric_key in val_metrics:
+            score = float(val_metrics[metric_key])
+        result = apply_best_retention(
+            ckpt_root=self.config.trainer.default_local_dir,
+            step=int(self.global_steps),
+            score=score,
+            max_to_keep=max_to_keep,
+            metric=metric_key,
+        )
+        print(
+            f"best-ckpt retention metric={metric_key} step={self.global_steps} "
+            f"score={result.get('score')} inherited={result.get('inherited')} "
+            f"kept={result.get('keep')} dropped={result.get('drop')}"
+        )
+        return {
+            "ckpt/keep_mode": 1.0,
+            "ckpt/score": result.get("score") if result.get("score") is not None else float("nan"),
+            "ckpt/n_kept": float(len(result.get("keep") or [])),
+            "ckpt/n_dropped": float(len(result.get("dropped_paths") or [])),
+        }
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -2301,7 +2964,7 @@ class RayPPOTrainer:
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
-            logger.log(data=val_metrics, step=self.global_steps)
+            logger.log(data=self._tracker_metrics(val_metrics), step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
 
@@ -2593,6 +3256,7 @@ class RayPPOTrainer:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate
+                step_val_metrics = None
                 if (
                     self.val_reward_fn is not None
                     and self.config.trainer.test_freq > 0
@@ -2600,6 +3264,7 @@ class RayPPOTrainer:
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()
+                        step_val_metrics = val_metrics
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
@@ -2622,7 +3287,7 @@ class RayPPOTrainer:
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
-                        self._save_checkpoint()
+                        metrics.update(self._save_checkpoint(val_metrics=step_val_metrics) or {})
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (
@@ -2657,6 +3322,10 @@ class RayPPOTrainer:
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+                # Batch composition (source / view budget / privilege bucket), so a
+                # jump in the CV-Bench curve can be checked against the data mix
+                # that step actually saw instead of being credited to the method.
+                metrics.update(compute_sample_provenance_metrics(batch=batch))
                 # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
 
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
@@ -2664,7 +3333,7 @@ class RayPPOTrainer:
                     self.train_dataloader.sampler.update(batch=batch)
 
                 # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=self.global_steps)
+                logger.log(data=self._tracker_metrics(metrics), step=self.global_steps)
 
                 progress_bar.update(1)
                 self.global_steps += 1

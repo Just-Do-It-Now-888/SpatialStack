@@ -1,0 +1,61 @@
+experiment_id: 20260902_qwen35base_vsibench_rescore_boxed
+title: "基座 20260820 无 boxed dump，用 boxed-primary 规则重打分（不占卡）"
+status: completed
+completed_at: "2026-09-02T22:03:00+08:00"
+
+created_at: "2026-09-02T22:03:00+08:00"
+owner: cursor-window-mvopsd
+node: cpu-only
+
+goal: >
+  对 2026-08-20 基座无 boxed 生成，用现行 boxed last-line 抽取
+  （VSIBENCH_BOXED_PRIMARY=1：有闭合框只认框内，否则末行 answer_tail）重打分。
+  不重新推理，不覆盖 48.06 dump，也不覆盖 rescore_answer_tail_nobox。
+
+protocol:
+  launcher: scripts/opsd/tools/rescore_vsibench_samples.py --boxed-primary
+  generation: reused
+  source_dump: logs/eval/20260820_qwen35base_vsi_anchor/frames_32/20260820/vsibench/models__Qwen3.5-4B/20260820_113832_samples_vsibench.jsonl
+  VSIBENCH_PROTOCOL: spatialstack
+  VSIBENCH_BOXED_PRIMARY: "1"
+  boxed_primary: true
+  prompt_suffix: none (original generation had none)
+
+artifacts:
+  output_dir: logs/eval/20260820_qwen35base_vsi_anchor/rescore_boxed_primary
+  summary: logs/eval/20260820_qwen35base_vsi_anchor/rescore_boxed_primary/summary.json
+  samples: logs/eval/20260820_qwen35base_vsi_anchor/rescore_boxed_primary/samples.jsonl
+
+results:
+  source_overall: 53.40
+  rescore_overall: 52.75
+  rescore_answered_pct: 98.13
+  delta_vs_source: -0.65
+  rows_changed: 118
+  boxed_present: 0
+  box_only_overall: 0.00
+  vs_answer_tail_rescore: 0.00
+  reading: >
+    5,130 行里闭合 \\boxed{} 为 0。boxed-primary 对无框行退回末行 answer_tail，
+    因此 overall **52.75**，与 rescore_answer_tail_nobox **逐比特相同**。
+    诊断列 box-only 为 0.00（没有框可抽）。不能把这份重打分读成 48.06：
+    48.06 是带 boxed 后缀重新生成后再抽框。
+
+comparability:
+  do_not_mix:
+    - "离线 boxed last-line greedy 4096 重新生成（基座 48.06）"
+    - "无 boxed 源 dump 当时落盘 53.40"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-02T22:04:00+08:00"
+  current_task: "boxed-primary 重打分完成：52.75，与无框 answer_tail 重打相同"
+  owner: cursor-window-mvopsd
+  resources: ""
+  next_action: "若要得到 48 量级，必须重新生成，不能只换解析"
+
+activity_log:
+  - at: "2026-09-02T22:03:00+08:00"
+    what: >
+      --boxed-primary 跑完。boxed present 0/5130；rule 52.75；
+      相对源 53.40 为 −0.65；相对 answer_tail 重打为 0。

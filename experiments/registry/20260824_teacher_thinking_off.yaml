@@ -1,0 +1,305 @@
+experiment_id: 20260824_teacher_thinking_off
+title: "最小因果验证：teacher_enable_thinking=False，其余与 llava_hound arm 完全一致，25 步"
+status: completed  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-24T01:08:00+08:00"
+finished_at: "2026-08-24T04:18:00+08:00"
+owner: "cursor-window-mvopsd"
+
+goal: >
+  补上 20260821_mvopsd_single_source 缺的那个单变量对照。那一轮两条 arm 都在前 25 步内
+  发生 response-length explosion（llava_hound VSI 53.38 -> 21.92，验证 median 4 -> 1024），
+  诊断把 `teacher_enable_thinking=True` 列为最高优先级机制假设，但**同一轮同时改了数据源、
+  rollout.n 与 thinking 三项**，所以那条 arm 无法把 thinking 单独拿出来（该轮
+  root_cause_assessment 与 ISSUE 均标为 diagnosed 而非 resolved）。
+  本 arm 只改 thinking 一项。
+
+hypothesis: >
+  可检验的表述：teacher 在打开的 `<think>` 上下文里给 student 的全部 response token
+  提供**推理态** soft target，而 student 自己是 non-thinking 渲染；若这个 mode mismatch
+  是长度爆炸的主要机制，那么把 teacher 也改成 non-thinking（两侧同态，即 Vision-OPD
+  的原始设定）后，训练侧 `response_length/mean` 不应在 25 步内从约 226 涨到约 821，
+  `clip_ratio` 不应到 0.5，验证 `resp_tokens/median` 不应从 4 跳到 1024。
+  若长度仍然爆炸，则机制不在 thinking，而应转向「整段 response 等权蒸馏」
+  （代码无 answer-only mask，逐帧枚举与最终答案同权）与单源回答风格。
+  **两个结果都是有信息的**；这条 arm 的价值不取决于哪个方向。
+
+design:
+  changed_vs_control: 1
+  change: "actor_rollout_ref.actor.self_distillation.teacher_enable_thinking: True -> False"
+  everything_else: >
+    与 20260821_mvopsd_single_source 的 llava_hound arm 逐项相同：同一 `main_train.parquet`
+    （37,509 行）、同一模型 `models/Qwen3.5-4B`、lr 2e-6、batch 64、rollout.n=1、
+    frozen teacher、teacher 视角上限 8、student K~U{2,3,4,5}、
+    max_prompt 4096 / max_response 1024、val prompt cap 11264、seed 20260816、
+    验证集 `vsibench_val.parquet`（5,130 题 @32 帧）、验证解码贪心。
+  rendering_effect: >
+    Qwen3.5 模板下 teacher 的生成提示词结尾由 `<|im_start|>assistant\n<think>\n`
+    （推理块打开）变为 `...<think>\n\n</think>\n\n`（预先闭合），即与 student 逐字节相同。
+    teacher prompt 因此比对照长 2 个 token（对照侧短 2 个），相对 12,288 上限可忽略。
+    `test_thinking_split.py` 已校验 `False` 只改 enable_thinking 一项、不动题面。
+  total_steps: 25
+  test_freq: 25
+  save_freq: 25
+  epochs: 0.043
+  rationale_for_25_steps: >
+    对照组的失效**完整发生在前 25 步内**（step 1 mean 225.7 / clip 0.0 ->
+    step 25 mean 821.3 / clip 0.5），继续训练到 175 步没有带来新的判别信息
+    （21.31 vs 21.92，曲线在低平台稳定）。25 步足以覆盖被解释的现象，
+    且训练侧 `response_length/mean` 与 `clip_ratio` 每步都记，
+    步 10/15/20/25 的读数不需要额外评测点。
+  known_gap_of_this_design: >
+    只有 step 0 与 step 25 两个 VSI 评测点。**若本 arm 也爆炸**，我们能确认「爆了」
+    但不能定位它在第几步爆——对照组也只有这两个点，所以跨 arm 比较不受影响；
+    若需要定位，下一轮用 TEST_FREQ=5（+5 个评测点，约 +2.5 h）。
+
+control:
+  source: "experiments/registry/20260821_mvopsd_single_source.yaml，arm llava_hound"
+  experiment_name: 20260821_mvopsd_single_llava_hound_main
+  log: "logs/train/20260821_mvopsd_single_llava_hound_main/train_20260821_163501.log"
+  step_0:
+    vsi_overall: 0.5338323334539066
+    vsi_rule_only: 0.5338323334539066
+    val_resp_tokens: {mean: 94.55, median: 4, p95: 334, at_1023_plus: 0.0191}
+  step_25:
+    vsi_overall: 0.21920786216563054      # 级联 judge 后
+    vsi_rule_only: 0.2085048113036305     # 规则层，跨 arm 应比这一列
+    vsi_micro: 0.22218323586744637
+    answered_frac: 1.0
+    val_resp_tokens: {mean: 1014.97, median: 1024, p95: 1024, max: 1024}
+    train_response_length: {mean: 821.28125, min: 187, max: 1024, clip_ratio: 0.5}
+    vopd_loss: 0.01385435806150781
+    grad_norm: 0.5880760550498962
+    judge: {pending: 136, woken: 1, recovered: 40, unparsed: 0}
+  train_step_1:
+    response_length_mean: 225.72
+    clip_ratio: 0.0
+    vopd_loss: 0.06696
+
+comparability:
+  scoring_caveat: >
+    **跨 arm 只能比 `val-core/vsibench/rule_only/acc`。**
+    对照组跑在 2026-08-21，判官是**级联**模式（只对规则读不出的行送判，只能加分）；
+    本 arm 跑在判官主口径改为**严判 extract** 之后（`trainer.validation_judge.mode=extract`
+    默认，全行送判、可以往下改分）。因此两侧的 `overall/acc` 是两个不同的估计量：
+    对照 21.92 = 规则 20.85 + 级联加分 1.07；本 arm 的 overall 可能**低于**自己的 rule_only。
+    `rule_only` 两侧定义一字未改，是唯一合法的对比列。
+  decoding: >
+    两侧验证均为**贪心**（`val_kwargs.do_sample=False`，未设 `VAL_DO_SAMPLE`）。
+    这是有意的：2026-08-23 的解码 A/B 证明采样会把同一权重的分数抬高约 13 pp，
+    但那是另一条序列，与对照组的曲线不可并列。曲线可比性优先。
+  base_anchor: >
+    训练内口径基座 = 53.62（2026-08-21 一级指标诊断）。对照组 step 0 实测 53.38，
+    本 arm 的 step 0 应落在同一带内——**这是本 arm 的第一道正确性闸门**，
+    偏离说明环境或验证集变了，此时长度结论不可信。
+
+primary_metric: "训练侧 response_length/mean 与 clip_ratio 的 25 步轨迹"
+must_watch:
+  - "step 10/15/20/25 的 response_length/mean：对照是 ~226 -> 821，clip 0 -> 0.5"
+  - "val-core/vsibench/rule_only/acc @step25 vs 对照的 20.85"
+  - "val-aux/vsibench/resp_tokens/median @step25 vs 对照的 1024（基座 4）"
+  - "self_distillation/raw_jsd_token_mean 平台：teacher 改回 non-thinking 后预期回落到前四条 arm 的 0.018~0.022 带（对照冒烟为 0.0619）；**移位本身不是方法有效或无效的证据**"
+  - "self_distillation/teacher_probe 必须恒定（frozen teacher）"
+  - "self_distillation/policy_fallback_fraction 必须恒 0"
+  - "val-aux/vsibench/judge/fellback_to_rules：为 1 时该点位不是严判口径，不能与其他点位并列"
+  - "step 0 必须复现 53.6 带；不复现则先查环境，不要解读长度"
+
+interpretation_rule: >
+  1. 本 arm 只能回答「thinking mismatch 是不是主要机制」，**不能**回答方法是否有效、
+     也不能回答 llava_hound 是否适合训练。25 步 = 0.043 epoch。
+  2. 单 seed 无误差棒。长度类指标（226 -> 821 这种量级）远超噪声，可以判读；
+     VSI 分数的几个百分点差异不可判读。
+  3. 若长度不爆但分数仍跌，结论是「换了失效形态」，不是「修好了」——
+     必须同时看 rule_only 与 resp_tokens 两列再表述。
+
+launch:
+  node: node-A
+  gpus: 8
+  queued_behind: >
+    启动时 node-A 8 卡正被 `20260823_base_greedy_tok4096`（基座贪心 4096 + 严判）占用。
+    用 `scripts/opsd/tools/chain_after.sh <pid> <min_free_mib> -- <cmd>` 排队：
+    先等该评测的驱动 PID 退出，再等每卡空闲显存 >= 80,000 MiB（防 ISSUE-403 的孤儿
+    vLLM worker 占卡），两个条件都满足才 exec 训练。
+  command: |
+    setsid nohup bash scripts/opsd/tools/chain_after.sh 712336 80000 -- \
+      env PATH=/usr/bin:$PATH \
+      EXPERIMENT_NAME=20260824_mvopsd_llava_hound_nothink_main \
+      TRAIN_FILE=$PWD/data/mvopsd/parquet_single_llava_hound_64k/main_train.parquet \
+      TOTAL_STEPS=25 TEST_FREQ=25 \
+      bash scripts/opsd/run_mvopsd.sh main \
+        actor_rollout_ref.actor.self_distillation.teacher_enable_thinking=False \
+      > logs/train/_queue/nothink_arm.log 2>&1
+  path_note: "PATH=/usr/bin 前置是必须的（ISSUE-304：~/.local 的 python 会顶掉系统 python）"
+  queue_log: logs/train/_queue/nothink_arm.log
+  outputs:
+    train_log: logs/train/20260824_mvopsd_llava_hound_nothink_main/
+    val_dump: logs/val/20260824_mvopsd_llava_hound_nothink_main/
+    rollouts: rollouts/20260824_mvopsd_llava_hound_nothink_main/
+    checkpoint: checkpoints/20260824_mvopsd_llava_hound_nothink_main/
+  wandb: "slcheng/MV-OPSD，run 名即 experiment_name"
+
+wall_clock_estimate: >
+  25 步 × 约 33 s/步（对照实测 timing_s/step=33.0）= 14 min 训练；
+  评测 2 次（step 0 与 step 25）× 约 29.5 min 生成 = 59 min；
+  严判 judge 全行送判离线实测 12.4~13.0 min/次 × 2 = 26 min。
+  合计约 1.7 h，另加 vLLM 起引擎与 judge 预热约 10 min。
+  **评测占约 80% 墙钟**，与对照组同因（评测集 5,130 题贵、rollout.n=1 训练步便宜）。
+
+preflight:
+  node: "dsw-455344-95d655c8f-xm7dq（node-A）"
+  disk_free: "3.3T"
+  checkpoint_dir_empty: true
+  train_file_rows: 37509
+  override_type_checked: "hydra compose 后 teacher_enable_thinking 是 bool False，不是字符串"
+  test_thinking_split: "全绿（三侧取值、null 继承、两侧渲染只差推理块）"
+  judge_mode_resolved: "extract"
+  val_do_sample_resolved: false
+
+activity_log:
+  - at: "2026-08-24T01:08:00+08:00"
+    what: >
+      登记并排队。启动前核验：node-A、3.3T 空闲、checkpoints 目录为空、
+      训练文件 37,509 行、override 解析为 bool False、test_thinking_split 全绿。
+      因 8 卡被基座评测占用，用 chain_after.sh 排在其后（PID 712336 + 80 GB/卡 闸门）。
+  - at: "2026-08-24T01:06:00+08:00"
+    what: >
+      新增 scripts/opsd/tools/chain_after.sh。第一版按 pgrep 模式等待，
+      自身命令行含该模式会自匹配而死等（启动它的 shell 也含），改为按 PID 等待。
+
+handoff: >
+  作业已排队但**尚未开始训练**：等 node-A 的基座评测（driver PID 712336）退出并让出显存。
+  接管时先看 logs/train/_queue/nothink_arm.log 判断处于哪个阶段
+  （waiting for PID / waiting for memory / 已 exec）。训练一旦起来，
+  第一件要确认的事是 step 0 是否复现 53.6 带。
+
+next_action: >
+  step 25 跑完后：① 与对照组逐项对比 response_length/clip_ratio/resp_tokens/rule_only；
+  ② 把结论写回本文件与 20260821_mvopsd_single_source 的 root_cause_assessment
+  （**不要覆盖**那条 diagnosed 记录，追加本 arm 的判定）；
+  ③ 据结果决定是走「answer-aware 蒸馏权重」还是重启单源 arm。
+
+do_not: >
+  不要在本 arm 结果出来前启动 vsi_appr_order / spar_32view（共享失效机制未排除）；
+  不要把本 arm 的 overall 与对照组的 21.92 并列（判官口径不同，见 comparability）；
+  不要顺手改任何第二个变量——这条 arm 的全部价值在于只改了一项。
+
+results:
+  wall_clock: "02:35 起，04:18 结束，1.72 h（与预估 1.7 h 相符）"
+  step_0_gate:
+    vsi_rule_only: 0.5338093042701861
+    control_step_0_rule_only: 0.5338323334539066
+    delta_pp: -0.002
+    verdict: >
+      **闸门通过**。与对照组 step 0 差 0.002 pp，属同一权重同一验证集的引擎抖动。
+      环境、验证集、判分链都没变，因此下面的长度结论可信。
+    vsi_overall_strict_judge: 0.5283615482144944
+    val_resp_tokens: {mean: 93.82, median: 4, p95: 333, max: 1024}
+    answered_frac: 0.9822612085769981
+    judge: {strict: 1, graded: 5039, none: 91, raised: 10, lowered: 37, errors: 0, seconds: 71.3}
+
+  train_response_length_trace:
+    note: "逐步 mean，全部 25 步。对照组同一列是 225.7（step1）-> 821.3（step25）"
+    values: [224.77, 206.55, 213.36, 211.45, 221.31, 224.28, 194.56, 192.53, 211.17,
+             193.58, 205.05, 223.25, 187.81, 217.47, 221.58, 228.92, 201.14, 225.41,
+             201.91, 233.81, 224.13, 208.00, 195.75, 221.06, 221.31]
+    range: "187.8 ~ 233.8，无趋势"
+    clip_ratio: "25 步里 23 步为 0，step 5 与 step 25 各为 0.015625（64 条里 1 条）。对照组 step 25 是 0.5"
+
+  step_25:
+    vsi_rule_only: 0.5256786995956909
+    vsi_overall_strict_judge: 0.5143843141736733
+    vsi_micro: 0.5257894736842106
+    answered_frac: 0.9504873294346978
+    val_resp_tokens: {mean: 134.92, median: 4, p95: 1024, max: 1024}
+    train_response_length: {mean: 221.3125, clip_ratio: 0.015625}
+    vopd_loss: 0.014897522883984493
+    raw_jsd_token_mean: 0.014897522883984493
+    teacher_probe: 0.04456961154937744
+    policy_fallback_fraction: 0.0
+    judge: {strict: 1, graded: 4876, none: 254, raised: 9, lowered: 64, errors: 0}
+    by_type:
+      object_size_estimation: 0.6782791185729276
+      object_counting: 0.5670796460176991
+      obj_appearance_order: 0.5631067961165048
+      room_size_estimation: 0.5618055555555556
+      object_rel_distance: 0.5380281690140845
+      object_rel_direction: 0.500862844617349
+      object_abs_distance: 0.3605515587529976
+      route_planning: 0.34536082474226804
+
+  head_to_head_step_25:
+    note: "只比 rule_only——两侧判官模式不同，见 comparability"
+    thinking_on_control: 0.2085048113036305
+    thinking_off_this_arm: 0.5256786995956909
+    delta_pp: 31.72
+    length_mean: {thinking_on: 821.28, thinking_off: 221.31}
+    clip_ratio: {thinking_on: 0.5, thinking_off: 0.0156}
+    val_resp_tokens_median: {thinking_on: 1024, thinking_off: 4}
+
+conclusion:
+  confirmed: >
+    **假设成立，且是单变量证据。** 只把 `teacher_enable_thinking` 从 True 改为 False，
+    长度爆炸完全没有发生：训练侧 `response_length/mean` 25 步全程在 187.8~233.8 之间无趋势，
+    `clip_ratio` 几乎恒为 0（对照组同期 225.7 → 821.3、clip 0 → 0.5）；
+    验证侧 `resp_tokens` 中位数保持 4（对照组变为 1,024）。
+    step 25 的 VSI `rule_only` 为 **52.57 vs 对照 20.85，差 31.72 pp**。
+    因此 20260821 那轮的 response-length explosion 的主要机制就是
+    **teacher 在打开的 `<think>` 里给 student 的每个 token 提供推理态 soft target，
+    而 student 自己是 non-thinking**——两侧同态后机制消失。
+  not_confirmed: >
+    1. **这不等于方法有效。** 25 步 = 0.043 epoch，rule_only 从 53.38 掉到 52.57
+       （−0.81 pp），即「不再破坏」而不是「有提升」。本 arm 没有任何正收益证据。
+    2. **一条小尾巴正在形成，不能忽略**：验证侧 `resp_tokens` 的 p95 从 333 涨到 1,024
+       （即 ≥5% 的行已经撞满上限），`answered/frac` 从 98.23% 降到 95.05%，
+       判官判 NONE 的行从 91 涨到 254。中位数与训练侧均值都没动，
+       所以这是**长尾变粗**而不是整体漂移——正是 LESSON-020 说的「均值不动可能掩盖
+       长尾变粗」的那一面。25 步只够看到它开始，不够判断它会不会继续长。
+    3. **不能回答 llava_hound 是否适合训练**，也不能回答 teacher 可靠性排序假设。
+    4. VOPD loss 平台在两条 arm 上几乎相同（0.0149 vs 0.0139），而下游相差 31.72 pp。
+       **这是 LESSON-012 的又一次独立复现**：JSD 平台高低与能力无关，
+       不能用 loss 曲线判断这个方法是否在起作用。
+  frozen_teacher_verified: "teacher_probe 全程 0.04456961154937744，与前七轮同值；policy_fallback_fraction 恒 0"
+
+next_action: >
+  ① 把本 arm 的判定追加到 20260821_mvopsd_single_source 的 root_cause_assessment
+  （**追加，不覆盖**那条 diagnosed 记录）与 LESSONS；
+  ② 决定是否用 thinking=False 重跑一条完整 arm（586 步 / 1 epoch），
+  以及是否需要先把「长尾变粗」量化到能设早停阈值——本 arm 只有 2 个评测点，
+  若要盯尾巴的走势，下一条 arm 应把 TEST_FREQ 降到 5 或 10；
+  ③ vsi_appr_order / spar_32view 现在具备启动条件（共享失效机制已定位并消除），
+  但启动前应先决定 ② 里的步数与评测密度。
+
+issues:
+  - id: ISSUE-501
+    title: "排队启动继承了 conda 的 PYTHONNOUSERSITE=1，judge 起不来，训练在 0 步就退出"
+    status: resolved
+    found_at: "2026-08-24T01:21:04+08:00 首次自动启动"
+    symptom: >
+      chain_after.sh 正确等到评测退出并放行，run_mvopsd.sh 打完全部配置行后立刻死在
+      judge 启动：`judge server died during startup`，judge 日志里是
+      `/usr/bin/python3: No module named 'vllm'`。GPU 未被占用，无 checkpoint，
+      唯一产物是一个 146 字节的 judge 日志。
+    evidence: >
+      发起排队的那个 shell 里 `CONDA_DEFAULT_ENV=sr_opsd`、`PYTHONNOUSERSITE=1`。
+      复现：`env PATH=/usr/bin:$PATH python3 -c "import vllm"` -> ModuleNotFoundError；
+      `env -u PYTHONNOUSERSITE PATH=/usr/bin:... python3 -c "import vllm"` -> 0.18.0。
+    root_cause: >
+      训练环境是**系统 python3.12 + ~/.local**（vllm 装在 ~/.local）。
+      conda activate 会导出 `PYTHONNOUSERSITE=1`，该变量让任何 python 跳过 user site，
+      于是 `/usr/bin/python3` 看不见 ~/.local 里的 vllm。归档的启动命令
+      `PATH=/usr/bin:$PATH` 本身没错——它在**非 conda** shell 里成立；
+      本次是从做离线评测（conda `sr_opsd`）的窗口里排的队，环境被 setsid 原样继承。
+      与 ISSUE-202 同一根因，只是发生在另一个脚本上。
+    solution: >
+      ① `run_mvopsd.sh` 在 wandb 预检之后、导出 PYTHONPATH 之前加了一道闸门：
+      用 `importlib.util.find_spec('vllm')`（不是真 import，省掉约 10 s）检查可见性，
+      不可见就报出 python3 的实际路径，并在 `PYTHONNOUSERSITE` 有值时直接点名它、
+      给出 `env -u PYTHONNOUSERSITE` 的改法。实测 0.4 s 内失败，
+      而不是等 judge 起不来后抛一句指向错误方向的话。
+      ② 用干净环境重启：`env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV
+      -u CONDA_SHLVL -u CONDA_PYTHON_EXE PATH=<剔除 miniconda 的 PATH>`。
+    prevention: >
+      从做过离线评测的窗口启动训练时，环境不干净是默认状态而不是意外。
+      归档的启动命令只写 `PATH=/usr/bin:$PATH` 是不够的，必须连 conda 的
+      `PYTHONNOUSERSITE` 一起清掉。闸门已经把这件事变成 0.4 s 的显式报错。
+    cost: "约 70 min 空转（排队等评测让卡 13 min + 无人察觉的失败态 57 min）"

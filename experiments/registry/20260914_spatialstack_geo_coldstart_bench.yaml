@@ -1,0 +1,119 @@
+experiment_id: 20260914_spatialstack_geo_coldstart_bench
+title: "SpatialStack geo 冷启动：CV-Bench / BLINK-Spatial / SPAR-Bench 离线补测"
+status: completed
+completed_at: "2026-09-14T17:32:28+08:00"
+
+created_at: "2026-09-14T16:52:00+08:00"
+owner: cursor-window-spatialstack
+
+goal: >
+  对 output/spatialstack_qwen35_train（20260909 geo SFT）补跑 CV-Bench、BLINK-Spatial、
+  SPAR-Bench 冷启动分数，作为 MV-OPSD 三集模拟/对照的真实锚点。VSI 已有实测 66.59。
+
+relations:
+  init_checkpoint: 20260909_spatialstack_qwen35_geo
+  mvopsd_context: 20260909_spatialstack_mvopsd_spar3_student_k
+
+model:
+  path: output/spatialstack_qwen35_train
+  geometry_encoder: models/VGGT-1B
+  impl: qwen3_5
+
+evaluation:
+  engine: huggingface_lmms_eval
+  conda_env: sr_opsd
+  launcher: scripts/opsd/run_spatialstack_geo_bench_eval.sh
+  protocols:
+    cvbench:
+      CVBENCH_PROTOCOL: spatialstack
+      max_new_tokens: 1024
+      metric: combined_accuracy
+    blink_spatial:
+      BLINK_PROTOCOL: spatialstack
+      VSIBENCH_BOXED_PRIMARY: "1"
+      max_new_tokens: 1024
+      metric: blink_spatial_macro
+      n_tasks: 3
+      note: >
+        只报 HF blink_spatial（multi_view / relative_depth / spatial_relation）。
+        不报 14 任务全量 BLINK。
+    sparbench:
+      SPARBENCH_PROTOCOL: boxed
+      SPARBENCH_MAX_NEW_TOKENS: 2048
+      metric: sparbench_score
+  smoke:
+    limit: 8
+    gpus: "0"
+    gates:
+      - "loads Qwen3_5ForConditionalGenerationWithGeometry"
+      - "cvbench_answered > 0"
+      - "no CUDA OOM"
+  full:
+    gpus: "0,1,2,3,4,5,6,7"
+    output_root: logs/eval/20260914_spatialstack_geo_coldstart
+  results:
+    cvbench:
+      combined: 86.06
+      answered: 100.0
+      json: logs/eval/20260914_spatialstack_geo_coldstart/20260914/cvbench/output__spatialstack_qwen35_train/20260914_165543_results.json
+    blink_spatial:
+      macro: 52.29
+      multi_view_reasoning: 5.26
+      relative_depth: 83.06
+      spatial_relation: 68.53
+      json: logs/eval/20260914_spatialstack_geo_coldstart/20260914/blink_spatial/output__spatialstack_qwen35_train/20260914_165919_results.json
+    sparbench:
+      overall: 68.86
+      json: logs/eval/20260914_spatialstack_geo_coldstart/20260914/sparbench/output__spatialstack_qwen35_train/20260914_170031_results.json
+    vsibench_boxed_prior:
+      overall: 66.59
+      source: 20260909_spatialstack_qwen35_geo
+    mvopsd_k1k2_projection:
+      status: simulated
+      eval: vsibench_boxed_only
+      train_sources: [spar3_measured, llava_hound_simulated, vlm3r_simulated]
+      note: >
+        三个训练源，评测只报 VSI。SPAR3 用 20260909 实测；
+        LLaVA-Hound / VLM-3R 按 ±0.3 pp 外推，相对 geo 无明显增益。
+
+comparability:
+  do_not_mix:
+    - "BLINK-Spatial 3 任务 vs 14 任务全量 BLINK"
+    - "HF lmms-eval vs vLLM（基座 CV 87.62 / BLINK 全量 62.67）"
+    - "基座 HF BLINK-Spatial 65.99 与 geo 52.29 可同协议对照，不可与 vLLM 全量并列"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-14T21:16:00+08:00"
+  current_task: "无"
+  owner: cursor-window-spatialstack
+  active_job_id: ""
+  next_action: "对外只报 BLINK-Spatial 三任务 52.29；不补 14 任务全量"
+
+issues:
+  - id: ISSUE-001
+    status: wontfix_report_spatial_only
+    symptom: "task=blink（14 任务）在几何融合 forward 报 token 数不对齐"
+    evidence: >
+      logs/eval/20260914_spatialstack_geo_blink_full/nohup.out：
+      feature_fusion.py features_2d + geo_feats，例如 2664 vs 3584。
+    root_cause: "全量 BLINK 含多图样本；VGGT fusion 与视觉 token 数在部分题目上不一致。blink_spatial 三任务能跑通。"
+    solution: "按用户要求只记录 blink_spatial；不报 14 任务全量。"
+    prevention: "几何权重默认 BENCHMARKS=blink_spatial，不要用 blink group。"
+
+activity_log:
+  - at: "2026-09-14T16:54:30+08:00"
+    action: "冒烟 LIMIT=8：cvbench/blink_spatial/sparbench 均 rc=0"
+    result: "几何权重加载 OK；cvbench_answered=100%；无 OOM"
+  - at: "2026-09-14T16:55:30+08:00"
+    action: "启动全量 eval（8 卡，无 LIMIT）"
+    result: "nohup_full.out；PGID 1950167"
+  - at: "2026-09-14T17:32:28+08:00"
+    action: "三集全量结束 rc=0"
+    result: "CV 86.06 / BLINK-Spatial 52.29 / SPAR 68.86"
+  - at: "2026-09-14T20:57:45+08:00"
+    action: "尝试 14 任务 blink 全量"
+    result: "fusion token 对齐失败；无有效 results.json"
+  - at: "2026-09-14T21:16:00+08:00"
+    action: "按用户要求只记录 BLINK-Spatial"
+    result: "registry 写入 52.29；不补全量 14 任务"

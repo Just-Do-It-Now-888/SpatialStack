@@ -1,0 +1,33 @@
+experiment_id: 20260827_step225_tok4096_trust_terse
+title: "step225 离线重评：trust_terse + tok4096，greedy vs sample"
+status: running
+parent: 20260826_mvopsd_vlm3r_epoch1_boxed_sample
+
+checkpoint: checkpoints/20260826_mvopsd_vlm3r_epoch1_boxed_sample/global_step_225
+
+protocol:
+  frames: 32
+  max_tokens: 4096
+  prompt_suffix: ' The final answer MUST BE put in \boxed{}.'
+  judge_mode: extract
+  trust_boxed: true
+  trust_terse: true
+  note: "trust_terse 无截断门控；整串数字/字母与 boxed 同等免判"
+
+runs:
+  - name: greedy
+    do_sample: false
+    out_dir: logs/vsi_train_eval/20260826_mvopsd_vlm3r_epoch1_boxed_sample/global_step_225_tok4096_greedy_trust_terse
+    log: logs/eval/20260827_step225_tok4096_greedy_trust_terse.log
+  - name: sample
+    do_sample: true
+    temperature: 1.0
+    top_p: 0.8
+    out_dir: logs/vsi_train_eval/20260826_mvopsd_vlm3r_epoch1_boxed_sample/global_step_225_tok4096_sample_trust_terse
+    log: logs/eval/20260827_step225_tok4096_sample_trust_terse.log
+
+code_changes:
+  - scripts/opsd/vsibench_scoring.py: is_terse_answer()
+  - verl_pkg/verl/trainer/ppo/ray_trainer.py: validation_judge.trust_terse
+  - scripts/opsd/tools/judge_vsibench_full_extract.py: --trust-boxed/--trust-terse
+  - scripts/opsd/run_training_vsibench_eval.sh: PROMPT_SUFFIX, trust flags

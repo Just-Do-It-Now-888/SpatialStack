@@ -1,0 +1,113 @@
+experiment_id: 20260901_vsibench_boxed_lastline
+title: "VSI-Bench 离线重测：基座 + SPAR3 K=1/K=2 best，对齐训练内 boxed last-line"
+status: completed
+
+created_at: "2026-09-01T17:32:00+08:00"
+owner: cursor-window-mvopsd
+
+goal: >
+  用刚对齐的 lmms-eval spatialstack（boxed last-line 题面 + boxed_primary 解析，
+  greedy 4096）重测发布基座与 SPAR3 两臂最佳 checkpoint。不可与旧无后缀 dump
+  或训练内 sample val（约 46.5%）并列。
+
+protocol:
+  launcher: scripts/evaluation/eval.sh
+  conda_env: sr_opsd
+  VSIBENCH_PROTOCOL: spatialstack
+  VSIBENCH_BOXED_PRIMARY: "1"
+  decoding: greedy
+  max_new_tokens: 4096
+  frames: 32
+  disable_thinking: true
+  model_impl: qwen3_5
+  note: >
+    题面与 vsibench_val_boxed_lastline.parquet 相同后缀；解析与
+    vsibench_boxed_primary 相同。解码是 greedy，训练 SPAR3 val 当时是 sample。
+
+arms:
+  base:
+    node: node-A
+    after: k1
+    model: models/Qwen3.5-4B
+    output_root: logs/eval/20260901_qwen35base_vsibench_boxed_lastline
+    status: done
+    wrapper_pid: 1887931
+    log: logs/eval/20260901_qwen35base_vsibench_boxed_lastline/nohup_offline.out
+    env_retry: "HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1"
+    overall: 48.06
+    answered_frac: 95.75
+    results_json: logs/eval/20260901_qwen35base_vsibench_boxed_lastline/20260901/vsibench/models__Qwen3.5-4B/20260901_213633_results.json
+    finished_at: "2026-09-02T00:33:36+08:00"
+  k1:
+    node: node-A
+    train_best_step: 55
+    hf_dir: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+    output_root: logs/eval/20260831_mvopsd_spar3_k1_vsibench_boxed_lastline
+    wrapper_pid: 1524455
+    status: done
+    overall: 49.84
+    answered_frac: 98.25
+  k2:
+    node: node-B
+    train_best_step: 15
+    hf_dir: output/20260831_mvopsd_spar3_k2_epoch1_nothink_global_step_15_hf
+    output_root: logs/eval/20260831_mvopsd_spar3_k2_vsibench_boxed_lastline
+    wrapper_pid: 1557904
+    status: done
+    overall: 49.23
+    answered_frac: 95.69
+
+comparability:
+  do_not_mix:
+    - "训练内 boxed_lastline + sample（SPAR3 step0 ~46.5%）"
+    - "旧 lmms-eval spatialstack 无 boxed 后缀 / 仅 answer_tail"
+    - "vLLM harness 基座 52.58（无 boxed 后缀、greedy）"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-02T05:22:00+08:00"
+  current_task: "三臂均已完成；基座 48.06 / K=1 49.84 / K=2 49.23（greedy boxed last-line）"
+  owner: cursor-window-mvopsd
+  resources: ""
+  next_action: "离线 greedy 口径下 SPAR3 两臂均略高于基座；不可与训练内 sample 曲线并列"
+
+issues:
+  - id: ISSUE-001
+    at: "2026-09-01T20:01:38+08:00"
+    symptom: >
+      K=1 完成后基座臂无 Model Responding；8 卡利用率高、显存约 1.1GB。
+    evidence: >
+      日志停在 20:01:38；rank 0 py-spy 在 huggingface_hub dataset_info SSL
+      do_handshake；其余 rank 在 accelerate wait_for_everyone。到 21:31 仍未前进。
+    root_cause: >
+      启动脚本 unset HF_HUB_OFFLINE，lmms-eval download() 仍向 hf-mirror 做
+      snapshot_download 元数据握手；镜像卡住时不会回落到本地 cache。
+    solution: >
+      杀掉 wrapper 1524455 树；HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
+      TRANSFORMERS_OFFLINE=1 只重跑基座（MASTER_PORT=29522）。K=1 产物未动。
+    status: resolved
+    prevention: >
+      缓存已齐且 Hub 不可达时评测走离线；超过数分钟无 Model Responding
+      就查 rank 0 是否在 dataset_info，不要空等。见 LESSON-003 反向条。
+
+activity_log:
+  - at: "2026-09-02T00:33:36+08:00"
+    what: >
+      基座臂结束。overall 48.06，作答 95.75%。同口径 K=1 49.84（+1.78）、
+      K=2 49.23（+1.17）。chain_after 随即启动 200 步训练。
+  - at: "2026-09-01T23:30:00+08:00"
+    what: >
+      排队 20260901_mvopsd_spar3_k1_200steps：chain_after 等本臂 wrapper 1887931
+      退出且 GPU 空闲后开训。本评测结束后不要再占卡。
+  - at: "2026-09-01T17:35:33+08:00"
+    what: >
+      已启动。node-A wrapper 1524455：先 K=1 再基座；node-B wrapper 1557904：K=2。
+      accelerate 为 conda sr_opsd。两机 8 卡均已加载权重。
+  - at: "2026-09-01T20:01:20+08:00"
+    what: "K=1 finished status=0；随即 start base（随后卡在 Hub 握手，ISSUE-001）。"
+  - at: "2026-09-01T20:32:00+08:00"
+    what: "K=2 完成 overall 49.23 / answered 95.69%。"
+  - at: "2026-09-01T21:36:16+08:00"
+    what: >
+      杀掉卡住的基座树；以 HF 离线重跑基座，wrapper 1887931，
+      日志 nohup_offline.out。启动约 30s 已进入 Model Responding。

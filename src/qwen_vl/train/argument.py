@@ -37,6 +37,10 @@ class DataArguments:
     video_min_frame_pixels: int = field(default=4 * 28 * 28)
     max_samples: int = field(default=-1)
     shuffle: bool = field(default=True)
+    # Route images through VGGT's loader before the Qwen processor. Keep True to
+    # reproduce every run before 2026-09-06; see prepare_image_inputs for why
+    # portrait datasets want it off.
+    use_vggt_image_preprocess: bool = field(default=True)
 
 
 @dataclass

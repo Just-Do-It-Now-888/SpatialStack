@@ -1,0 +1,115 @@
+experiment_id: 20260918_spatialstack_geo_lastline
+title: "SpatialStack geo SFT 全量 lastline 重测（对照 VLM-3R T8/S4）"
+status: completed
+finished_at: "2026-09-18T12:21:10+08:00"
+
+created_at: "2026-09-18T10:57:00+08:00"
+started_at: "2026-09-18T11:00:02+08:00"
+driver_pid: 4128789
+eval_pgid: 4128789
+owner: cursor-window-spatialstack
+
+goal: >
+  用与 20260915 VLM-3R last3 相同的 lastline 口径重测 SpatialStack geo SFT。
+  全量 VSI lastline @4096，随后 CV / BLINK-Spatial / SPAR lastline。
+  作为 VLM-3R step 635 的 geo 对照，不可与 geo boxed 66.59 对减。
+
+relations:
+  checkpoint: 20260909_spatialstack_qwen35_geo
+  compare_to: 20260915_spatialstack_mvopsd_vlm3r_t8_s4
+  prior_boxed_vsi: 66.59
+  prior_boxed_benches: 20260914_spatialstack_geo_coldstart_bench
+
+environment:
+  conda_env: sr_opsd
+  nodes: [node-C]
+  gpus_per_node: 8
+  gpu_type: H20
+  ssh: "nodec / opsd3 as root; HOME=/home/c30084464"
+  engine: huggingface_lmms_eval
+
+model:
+  path: output/spatialstack_qwen35_train
+  geometry_encoder: models/VGGT-1B
+  impl: qwen3_5
+
+evaluation:
+  status: completed
+  finished_at: "2026-09-18T12:21:10+08:00"
+  entrypoint: scripts/opsd/eval_spatialstack_geo_lastline.sh
+  command: |
+    setsid nohup env HOME=/home/c30084464
+      bash scripts/opsd/eval_spatialstack_geo_lastline.sh
+  benchmarks: [vsibench, cvbench, blink_spatial, sparbench]
+  parameters:
+    VSIBENCH_PROTOCOL: lastline
+    VSIBENCH_BOXED_PRIMARY: "0"
+    vsibench_max_new_tokens: 4096
+    CVBENCH_PROTOCOL: lastline
+    BLINK_PROTOCOL: lastline
+    SPARBENCH_PROTOCOL: lastline
+    SPARBENCH_MAX_NEW_TOKENS: 2048
+    blink: 3-task spatial only
+  artifacts:
+    eval_root: logs/eval/20260918_spatialstack_geo_lastline
+    log: logs/eval/20260918_spatialstack_geo_lastline/run.log
+    nohup: logs/eval/20260918_spatialstack_geo_lastline/nohup.log
+    benches_log: logs/eval/20260918_spatialstack_geo_lastline/benches.log
+    vsi_json: logs/eval/20260918_spatialstack_geo_lastline/vsibench/vsibench/output__spatialstack_qwen35_train/20260918_110045_results.json
+    cv_json: logs/eval/20260918_spatialstack_geo_lastline/20260918/cvbench/output__spatialstack_qwen35_train/20260918_115608_results.json
+    blink_json: logs/eval/20260918_spatialstack_geo_lastline/20260918/blink_spatial/output__spatialstack_qwen35_train/20260918_115912_results.json
+    spar_json: logs/eval/20260918_spatialstack_geo_lastline/20260918/sparbench/output__spatialstack_qwen35_train/20260918_120036_results.json
+  results:
+    metrics:
+      vsibench_lastline: 66.46
+      vsibench_n: 5130
+      vsibench_answered: 100.0
+      cvbench_lastline: 85.99
+      cvbench_n: 2638
+      blink_spatial_macro: 52.29
+      blink_multi_view_reasoning: 5.26
+      blink_relative_depth: 83.06
+      blink_spatial_relation: 68.53
+      sparbench_lastline: 68.92
+      sparbench_n: 7211
+    summary: >
+      lastline geo SFT：VSI 66.46 / CV 85.99 / BLINK-Spatial 52.29 / SPAR 68.92。
+      主脚本 12:21 写完；补跑进程全部 skip。
+    failure_reason: ""
+
+read_rules:
+  - "lastline 不可与 geo boxed VSI 66.59 / CV 86.06 / SPAR 68.86 对减"
+  - "可与 VLM-3R T8/S4 lastline VSI 64.02 / CV 82.40 / SPAR 66.17 同口径对照"
+  - "BLINK 只报 3 任务 spatial，不报 14 任务全量"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-18T14:23:00+08:00"
+  current_task: "none; optional VLM-3R step635 BLINK-Spatial lastline gap-fill"
+  owner: cursor-window-spatialstack
+  active_job_id: ""
+  resources: "node-C 8×H20 idle"
+  blocker: ""
+  next_action: >
+    同口径对照 VLM-3R lastline：VSI 66.46 vs 64.02、CV 85.99 vs 82.40、SPAR 68.92 vs 66.17。
+    635 仍缺 BLINK lastline。不要和 boxed 66.59 对减。
+
+issues: []
+
+activity_log:
+  - at: "2026-09-18T11:00:02+08:00"
+    actor: cursor-window-spatialstack
+    action: "launch lastline geo eval on node-C sr_opsd"
+    result: "PID 4128789; VSI lastline accelerate 8 GPU"
+  - at: "2026-09-18T11:07:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "chain_after WAIT_PID=4128789 geo lastline CV/BLINK/SPAR gap-fill"
+    result: "benches_wait_pid 4167892; skip if results exist"
+  - at: "2026-09-18T12:21:10+08:00"
+    actor: node-C
+    action: "geo lastline chain finished"
+    result: "VSI 66.46 CV 85.99 BLINK 52.29 SPAR 68.92; benches watcher skipped"
+  - at: "2026-09-18T14:23:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "read node-C eval artifacts"
+    result: "registry/ACTIVE marked completed; GPUs idle"

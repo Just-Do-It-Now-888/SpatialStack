@@ -1,0 +1,365 @@
+experiment_id: 20260818_mvopsd_lr_batch_sweep
+title: "MV-OPSD LR x batch 扫描：4 条 arm，两机各串行 2 条"
+status: completed  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-18T21:57:00+08:00"
+finished_at: "2026-08-19T23:16:00+08:00"
+owner: "cursor-window-mvopsd"
+
+goal: >
+  v1（batch 64 / lr 2.0e-6）与 rollout8（batch 64 / n=8 / lr 2.0e-6）都收敛到一个
+  低于自身基座约 4 分的 CV-Bench 渐近线，且 JSD 平台值都停在 0.0157（ln2 的 2.3%）。
+  用户判断模型可能欠拟合，提出提高 LR 与增大 batch。本扫描在这两个维度各取两个点，
+  回答一个具体问题：**这两个旋钮能否移动渐近线与 JSD 平台，还是只改变到达平台的轨迹。**
+
+grouping_rationale: >
+  四条 arm 是四个不同的模型设定，本应各有 experiment_id；此处合并为一个 registry
+  是因为它们共享同一份假设、同一套判读标准与同一次分析，拆开会让对照关系散落。
+  每条 arm 有独立的 arm_id、实验名与产物路径，训练与评测都留在本文件内。
+
+hypothesis: >
+  主假设（来自已有证据，倾向于被证伪）：渐近线由 student 与 teacher 的视角信息落差
+  决定，是结构性下界，因此提高 LR 与增大 batch 只会更快到达同一平台。
+  次假设（用户提出，本扫描要测的）：当前 lr 2.0e-6 / batch 64 下模型尚未充分优化，
+  加大后渐近线上移。
+  第三种可能（必须留出）：提高 LR 会加深 step 30 附近的谷底——v1 的谷底恰好出现在
+  warmup 结束（step 10）之后 20 步，LR 已经被怀疑与损伤有关。
+
+arms:
+  - arm_id: lr5e6_b64
+    experiment_name: 20260818_qwen35base_mvopsd_lr5e6_b64_main
+    node: node-A
+    lr: 5.0e-6
+    train_batch_size: 64
+    sequences_per_step: 256
+    expected_step_seconds: 95
+    expected_wallclock_hours: 9.0
+  - arm_id: lr5e6_b128
+    experiment_name: 20260818_qwen35base_mvopsd_lr5e6_b128_main
+    node: node-A
+    lr: 5.0e-6
+    train_batch_size: 128
+    sequences_per_step: 512
+    expected_step_seconds: 183
+    expected_wallclock_hours: 16.3
+  - arm_id: lr1e5_b64
+    experiment_name: 20260818_qwen35base_mvopsd_lr1e5_b64_main
+    node: node-B
+    lr: 1.0e-5
+    train_batch_size: 64
+    sequences_per_step: 256
+    expected_step_seconds: 95
+    expected_wallclock_hours: 9.0
+  - arm_id: lr1e5_b128
+    experiment_name: 20260818_qwen35base_mvopsd_lr1e5_b128_main
+    node: node-B
+    lr: 1.0e-5
+    train_batch_size: 128
+    sequences_per_step: 512
+    expected_step_seconds: 183
+    expected_wallclock_hours: 16.3
+
+relations:
+  reference_runs:
+    - 20260817_qwen35base_mvopsd_v1          # batch 64 / lr 2.0e-6 / n=4
+    - 20260818_qwen35base_mvopsd_v1_rollout8 # batch 64 / lr 2.0e-6 / n=8
+  inherits: >
+    数据 parquet、基座权重、seed、frozen teacher、n=4、max_prompt/response 长度
+    与 v1 完全一致；四条 arm 之间只差 lr 与 train_batch_size。
+
+code:
+  git_commit: "未提交（新增 scripts/opsd/run_lr_batch_sweep.sh）"
+  git_dirty: true
+  key_files:
+    - scripts/opsd/run_lr_batch_sweep.sh   # 新增：单机串行驱动，本次扫描的入口
+    - scripts/opsd/run_mvopsd.sh           # 未改动，md5 7cdb9fcde2643ceb2578b58b4b2aefdd
+    - verl_pkg/verl/trainer/config/mvopsd.yaml  # 未改动，md5 ce9762546a32c84204c4916bc920fb9b
+  cross_node_parity_verified: >
+    启动前核对四个文件两机 md5 一致：run_mvopsd.sh 7cdb9fcd…、mvopsd.yaml ce976254…、
+    cvbench_val.parquet c4f32baf…、main_train.parquet 3b7a8796…。
+
+parameters:
+  shared:
+    arm: main
+    model: ./models/Qwen3.5-4B
+    teacher_regularization: frozen
+    rollout_n: 4
+    total_training_steps: 300
+    test_freq: 15
+    save_freq: 15
+    lr_warmup_steps: 10          # 脚本 226 行硬编码，本次未改
+    lr_schedule: "10 步线性 warmup 后恒定，无 decay"
+    clip_grad: 1.0               # verl 默认；v1 稳态 grad_norm 约 0.5，基本不触发
+    loss_agg_mode: token-mean
+    ppo_mini_batch_size: "= train_batch_size（脚本 222 行），故每步一次更新，严格 on-policy"
+    ppo_micro_batch_size_per_gpu: 1
+    seed: 20260816
+    judge: enabled (gpt-oss-120b, port 8100, sleep level 1)
+    val_file: data/eval/cvbench_verl/cvbench_val.parquet  # lmms_eval 排版
+  launch_commands:
+    node-A: "LR=5.0e-6 TAG=lr5e6 setsid nohup bash scripts/opsd/run_lr_batch_sweep.sh > logs/train/_sweep/lr5e6_driver.log 2>&1"
+    node-B: "LR=1.0e-5 TAG=lr1e5 setsid nohup bash scripts/opsd/run_lr_batch_sweep.sh > logs/train/_sweep/lr1e5_driver.log 2>&1"
+  driver_behaviour:
+    chaining: "batch 64 跑完立即起 batch 128，中间等端口 8100 与显存释放"
+    fast_failure_guard: >
+      某条 arm 在 1800s 内非零退出时中止整链（LESSON-007：不要让后续作业按同一个
+      环境故障逐个空转）；超过 1800s 的失败视为训练问题，后续 arm 继续跑。
+    cold_start_guard: "checkpoints/<name> 非空则跳过该 arm（ISSUE-101）"
+    disk_guard: "可用空间低于 1300GB 时跳过该 arm"
+
+baseline_context:
+  v1_reference:
+    step0_combined: 86.96
+    trough: "77.10 @ step 30（相对 step 0 −9.86pp）"
+    step300_combined: 83.57
+    saturating_asymptote: "83.24（相对 step 0 −3.72pp），τ≈92 步"
+    jsd_plateau: 0.0157
+    count_damage: "ADE20K/Count −9.36、COCO/Count −8.52（跌幅最大的两项）"
+  rollout8_reference:
+    step0_combined: 87.21
+    trough: "77.75 @ step 30"
+    step300_combined: 82.62
+    saturating_asymptote: "82.27（相对 step 0 −4.94pp），τ≈14.5 步"
+    jsd_plateau: 0.0157
+  caveats:
+    prompt_style: >
+      v1 与 rollout8 的曲线用 native "(A) 3" 排版，本扫描用 lmms_eval "A. 3" 排版。
+      **绝对值不可与 v1 的 86.96 / 83.57 直接并列**，必须各自用 val_before_train 的
+      step 0 归一化后比较。
+    cross_node_offset: >
+      同一基座在 node-A 测得 86.96、node-B 测得 87.21，差 +0.25 分（贪心解码在不同
+      kernel 与批次调度下的抖动）。跨机差异小于约 0.3 分时不得归因于配置。
+    grad_clip_interaction: >
+      clip_grad=1.0 而 v1 稳态 grad_norm 约 0.5。LR 提到 5e-6 / 1e-5 后若 grad_norm
+      越过 1.0，裁剪会吃掉部分增益，实际步长不是 2.5x / 5x。必须监控 actor/grad_norm。
+
+decision_criteria:
+  - metric: "谷底深度（相对自身 step 0）"
+    v1_value: "−9.86pp @ step 30"
+    pass_if: "明显变浅"
+  - metric: "饱和渐近线 C（相对自身 step 0）"
+    v1_value: "−3.72pp"
+    pass_if: ">= −1.0pp"
+  - metric: "JSD 平台值 actor/vopd_loss"
+    v1_value: 0.0157
+    pass_if: "< 0.0157"
+  - metric: "ADE20K/COCO Count 净变化"
+    v1_value: "−9.36 / −8.52"
+    pass_if: "不再是跌幅最大项"
+
+interpretation_rule: >
+  若谷底变浅但渐近线与 JSD 平台都不动，则这两个旋钮改善的是训练轨迹而非终点，
+  瓶颈在视角信息落差本身，不在优化。若 LR 越大谷底越深，则「增大 LR」这个方向
+  直接被否掉。
+  （原先此键误缩进在 decision_criteria 列表内部，使整个 YAML 无法解析，
+  2026-08-21 提为顶层键。）
+
+must_watch:
+  - "actor/grad_norm：是否顶在 clip_grad=1.0"
+  - "actor/vopd_loss：平台值是否低于 0.0157"
+  - "val-core/cvbench/answered/frac：格式崩溃告警"
+  - "val-aux/cvbench/judge/woken：模型开始跑题"
+  - "actor/policy_fallback_fraction：应恒为 0"
+  - "self_distillation/teacher_probe：应恒为 0.04456961154937744（teacher 冻结）"
+  - "response_length/mean 与分源 response_length：散文漂移"
+
+artifacts:
+  per_arm_pattern:
+    checkpoints: "checkpoints/<experiment_name>"
+    train_log: "logs/train/<experiment_name>/"
+    val_dumps: "logs/val/<experiment_name>/"
+    rollouts: "rollouts/<experiment_name>"
+    wandb: "slcheng/MV-OPSD run <experiment_name>"
+  driver_logs:
+    node-A: "logs/train/_sweep/lr5e6_driver.log, logs/train/_sweep/lr5e6_status.txt"
+    node-B: "logs/train/_sweep/lr1e5_driver.log, logs/train/_sweep/lr1e5_status.txt"
+  checkpoint_budget: >
+    save_freq=15 x 300 步 = 每条 20 个 checkpoint，单个约 55GB，即约 1.1T/条。
+    每机串行两条 = 2.2T，两机各有 3.7T 空闲，完成后余约 1.5T。
+    **这次必须保留权重**：v1 与 rollout8 的 checkpoint 已全部删除，导致主指标
+    VSI-Bench 低帧曲线至今无任何数字且无法补测。
+
+results:
+  measured_at: "2026-08-21"
+  source: >
+    从四条 arm 的 logs/train/<experiment_name>/train_*.log 直接解析
+    val-core/cvbench/combined/acc 与 actor/vopd_loss（node-B 两条经 ssh opsd2 取回）。
+    「末段均值」= 最后 5 个训练内评测点的平均；「JSD 平台」= 最后 20 个训练步的
+    actor/vopd_loss 均值。两个口径都在本文件内统一使用。
+  metrics:
+    lr5e6_b64:
+      step0: 86.22
+      trough: "78.76 @ step 15"
+      best: "83.89 @ step 225"
+      tail_mean_last5: 81.68
+      delta_vs_step0: -4.54
+      jsd_plateau: 0.0184
+      grad_norm_steady: 0.41
+      median_step_seconds: 96.7
+      completed_steps: 300
+    lr5e6_b128:
+      step0: 86.03
+      trough: "75.28 @ step 15"
+      best: "82.77 @ step 300"
+      tail_mean_last5: 82.33
+      delta_vs_step0: -3.69
+      jsd_plateau: 0.0183
+      grad_norm_steady: 0.30
+      median_step_seconds: 178.2
+      completed_steps: 300
+    lr1e5_b64:
+      step0: 86.13
+      trough: "77.68 @ step 15"
+      best: "84.20 @ step 180"
+      tail_mean_last5: 81.88
+      delta_vs_step0: -4.25
+      jsd_plateau: 0.0217
+      grad_norm_steady: 0.31
+      median_step_seconds: 103.0
+      completed_steps: 300
+    lr1e5_b128:
+      step0: 86.62
+      trough: "77.91 @ step 15"
+      best: "82.50 @ step 150"
+      tail_mean_last5: 80.14
+      delta_vs_step0: -6.47
+      jsd_plateau: 0.0207
+      grad_norm_steady: 0.24
+      median_step_seconds: 194.4
+      completed_steps: 274      # 按用户要求提前终止，末段窗口相应前移
+  vs_decision_criteria:
+    trough_depth: >
+      **部分达成**。谷底从 v1 的 step 30 提前到 step 15，但深度未明显变浅
+      （v1 −9.86pp；本轮 −7.46 / −10.75 / −8.45 / −8.71pp）。LR 只把谷底提前，没有填平它。
+    asymptote: >
+      **未达成**（判据 >= −1.0pp）。四条 arm 的 Δ 为 −3.69 ~ −6.47pp，与 v1 的 −3.72pp
+      处于同一区间，且四条之间的差异没有随 LR 或 batch 单调变化。
+    jsd_plateau: >
+      **未达成，且方向相反**（判据 < 0.0157）。同为 token-mean 口径，lr 2.0e-6 的
+      参照 run（rollout8）平台为 0.0155，而 5.0e-6 为 0.0183/0.0184、
+      1.0e-5 为 0.0207/0.0217，**随 LR 单调抬高**。即提高 LR 后模型在蒸馏目标本身上
+      拟合得更差，「当前 LR 下欠拟合」的次假设被证伪。
+    grad_clip_interaction: >
+      稳态 grad_norm 0.24~0.41，未持续触顶 clip_grad=1.0，因此上面的结论不是
+      「增益被裁剪吃掉」造成的。仅 warmup 首步达 2.3~4.5，属冷启动正常值。
+  summary: >
+    主假设成立、次假设被证伪：**LR 与 batch 只改变到达平台的轨迹，不移动终点。**
+    - LR：把谷底从 step 30 提前到 step 15，但 JSD 平台随 LR 单调抬高
+      （0.0155 → 0.018 → 0.021），护栏渐近线不动。方向被否掉，后续回到 5.0e-6。
+    - batch：加倍后 grad_norm 与 JSD 平台都略降（方差缩小，符合预期），但对护栏
+      渐近线的影响在两个 LR 上**符号相反**（+0.85 / −2.22pp），落在单种子噪声内，
+      不构成可复现收益，而墙钟严格翻倍。后续沿用 batch 64。
+    这一结论直接导致了下一轮把怀疑方向从优化侧转向 student 视角预算
+    （20260820_mvopsd_view_ratio），该方向随后也被否掉。
+  failure_reason: ""
+
+evaluation:
+  status: planned
+  note: >
+    本扫描的训练内指标仍是 CV-Bench（护栏指标）。**渐近线即使回到基座也只说明没有
+    破坏基座，不构成方法有效的证据。** 主指标 VSI-Bench @ {1,2,4,8,16,32} 帧必须在
+    本扫描结束后用保留下来的 checkpoint 补测，否则本轮又只产出护栏曲线。
+
+handoff:
+  current_phase: completed
+  last_updated: "2026-08-21T00:00:00+08:00"
+  current_task: "无。四条 arm 均已结束，results 已按 decision_criteria 填写。"
+  owner: "cursor-window-mvopsd"
+  active_job_id: "无"
+  resources: "两机 8 卡均已释放"
+  blocker: ""
+  next_action: >
+    本扫描本身已收口，不再有后续动作。原计划第 4 项「用保留的 checkpoint 补
+    VSI-Bench 低帧曲线」**不再由本扫描执行**：view_ratio 轮已证明训练内 CV-Bench
+    最佳的 checkpoint 在 VSI 上崩塌约 19 分（LESSON-020），因此在弄清退化机制之前，
+    对这四条 arm 的 checkpoint 补测低帧曲线的信息量很低。四个 checkpoint 仍保留，
+    待下一轮定位到退化根因后再决定是否回测。
+
+issues:
+  - id: ISSUE-104
+    status: resolved
+    phase: launch
+    discovered_at: "2026-08-18T21:59:00+08:00"
+    symptom: >
+      两机的 arm1 在启动约 130s 后同时以 rc=1 退出：
+      `RuntimeError: Error loading module from module_path='./scripts/opsd/mvopsd_reward.py'`。
+      驱动脚本的 fast-failure guard 判定为环境故障并中止了整链，未浪费机时。
+    evidence: >
+      栈底是 `ModuleNotFoundError: No module named 'cvbench_scoring'`，
+      抛在 scripts/opsd/mvopsd_reward.py 第 25 行，且发生在 Ray worker 内
+      （traceback 经 ray/_private/worker.py -> importlib._bootstrap_external.exec_module）。
+      mvopsd_reward.py 的 mtime 是 2026-08-18 13:48，cvbench_scoring.py 是 13:49，
+      都晚于 v1（08-17 22:00 启动）与 rollout8（08-18 03:12 启动），
+      因此这两条 run 用的是改动前的版本，改动后从未有人起过新 run。
+    root_cause: >
+      verl 通过 `import_utils.load_module` 的 `spec_from_file_location` 按路径加载
+      reward 文件，这条路径**不会**把文件所在目录放进 sys.path，所以同目录的
+      `from cvbench_scoring import ...` 在 worker 里解析不到。
+      仓库里其他 sibling import（tools/cvbench_parity_report.py、
+      tests/test_cvbench_val_parity.py、build_cvbench_val_parquet.py）都在 import 前
+      自己 `sys.path.insert` 过；mvopsd_reward.py 把 `# noqa: E402` 抄了过来，
+      却漏了配套的路径设置，于是只在"按路径加载"这一条调用链上失败。
+    solution: >
+      mvopsd_reward.py 在 sibling import 前插入自身目录（沿用仓库既有写法）。
+      验证方式不是"文件能 import"，而是**复刻 verl 的加载链**：
+      `PYTHONPATH=verl_pkg:. python3 -c "load_extern_object('./scripts/opsd/mvopsd_reward.py','compute_score')"`
+      并对 cvbench / 训练集两类 data_source 各打一次分，四个用例返回值正确；
+      `test_cvbench_val_parity.py` 全绿（含 2638/2638 prompt 逐条匹配）。
+      清理两机失败产物后于 22:04 重启，两机均越过该失败点进入 step 0 验证。
+    prevention: >
+      1) 任何由框架"按文件路径"加载的模块（reward、custom dataset、custom loss）
+         不能依赖 cwd 或 PYTHONPATH 来解析同目录导入，必须自己把所在目录加进 sys.path。
+      2) 改完这类模块后，验收标准是**用框架自己的加载器加载一次**，而不是在项目根
+         `import` 一下就算过——后者的 sys.path 与 Ray worker 不同，测不出这个故障。
+      3) 这是 ISSUE-103 的同族问题：共享代码在两次 run 之间被修改，而其间没有新 run
+         去暴露它。凡是训练链路上的文件被改动过，下一次正式启动前应先跑一次 SMOKE。
+         本次没跑 smoke，是靠 fast-failure guard 兜住的。
+
+activity_log:
+  - at: "2026-08-21T00:00:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "从训练日志解析四条 arm 的完整曲线，填 results 并按 decision_criteria 判读"
+    result: >
+      直接解析 logs/train/<arm>/train_*.log 的 val-core/cvbench/combined/acc 与
+      actor/vopd_loss（node-B 两条经 ssh opsd2 取回本地解析），四项判据逐条对照后
+      status 改为 completed。
+      **一处记录订正**：ACTIVE.md 与 20260820_mvopsd_view_ratio.yaml 的 goal 里
+      写的「四条 arm 的 JSD 平台一律 0.0157」与实测不符——0.0157 是 v1 的值，
+      四条 arm 分别为 0.0184 / 0.0183 / 0.0217 / 0.0207，且随 LR 单调抬高。
+      该误记不改变「LR/batch 只改轨迹不改终点」的结论，但把「平台完全不动」
+      弱化为「平台不降反升」，对下一步方向的判断更不利，故必须订正。
+      同期产出对外汇报稿 reports/汇报_20260821_优化超参与视角设计.md。
+  - at: "2026-08-20T00:10:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "扫描结束；四条 arm 仅保留 CV-Bench 最佳 checkpoint"
+    result: >
+      node-A lr5e6 链已于 2026-08-19 23:16 sweep_end。b128 保留 global_step_300
+      （82.77%）；b64 此前已留 step 225（83.89%）。node-B lr1e5_b128 于 step 274/300
+      按用户要求终止（非自然结束）；保留 global_step_150（82.50%，已存步中最高）。
+      lr1e5_b64 此前已留 step 180（84.20%）。b128 各删 19 个 checkpoint，每条约 54G。
+      两机 GPU 已释放。
+  - at: "2026-08-19T17:20:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "已完成 arm 仅保留 CV-Bench 最佳 checkpoint，删除其余"
+    result: >
+      依据训练内 val-core/cvbench/combined/acc（lmms_eval 题面，已存 checkpoint 步）：
+      lr5e6_b64 保留 global_step_225（83.89%，训后最高）；lr1e5_b64 保留
+      global_step_180（84.20%，训后最高）。各删 19 个 checkpoint，每条约 54G 剩余
+      （原 ~1.1T）。lr5e6_b128 / lr1e5_b128 仍在训练，未动。b128 跑完后按同规则处理。
+      v1 / rollout8 此前已全删，无操作。
+  - at: "2026-08-18T22:05:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "修复 ISSUE-104 后重启两条链"
+    result: >
+      mvopsd_reward.py 补上 sys.path 自定位（两机 md5 a55b9c8d2596f7694eaf12762312047e），
+      清理两机 arm1 的失败产物（logs/train、checkpoints、rollouts、logs/val）后冷启动。
+      node-A 22:04:33 起 lr5e6_b64，node-B 22:04:50 起 lr1e5_b64，
+      两者均已进入 val_before_train 的 step 0 CV-Bench 评测。
+  - at: "2026-08-18T21:57:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "新增串行驱动脚本并在两机同时启动扫描"
+    result: >
+      启动前核验：两机 GPU 全空（0 MiB x 8）、无残留 run_mvopsd/main_ppo/vLLM、
+      各 3.7T 空闲、checkpoints/ 为空、wandb 凭据就绪、models/{Qwen3.5-4B,gpt-oss-120b}
+      齐备、端口 8100 空闲、四个关键文件两机 md5 一致。
+      node-A 21:56:45 起 lr5e6_b64，node-B 21:57 起 lr1e5_b64。

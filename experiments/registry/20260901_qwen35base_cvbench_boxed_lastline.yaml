@@ -1,0 +1,91 @@
+experiment_id: 20260901_qwen35base_cvbench_boxed_lastline
+title: "零样本 Qwen3.5-4B CV-Bench：boxed last-line 协议"
+status: completed
+completed_at: "2026-09-01T15:19:48+08:00"
+
+created_at: "2026-09-01T14:53:00+08:00"
+owner: cursor-window-mvopsd
+node: node-A
+
+goal: >
+  在与 SPAR3 best ckpt 重跑相同的 CV-Bench 协议下，测发布版 Qwen3.5-4B 零样本，
+  作为 K=1 85.05 / K=2 86.80 的同口径锚点。
+
+model: models/Qwen3.5-4B
+
+protocol:
+  CVBENCH_PROTOCOL: spatialstack
+  CVBENCH_PARSER: boxed_lastline
+  decoding: greedy
+  max_new_tokens: 1024
+  disable_thinking: true
+  launcher: scripts/evaluation/eval.sh
+  conda_env: sr_opsd
+  note: >
+    本结果替代旧 spatialstack+word_boundary 基座 85.95，作为当前对外基座 CV-Bench。
+    SPAR3 旧 dump 84.82/84.84 亦不可并列。
+
+output_root: logs/eval/20260901_qwen35base_cvbench_boxed_lastline
+comparability:
+  same_protocol:
+    - logs/eval/20260831_mvopsd_spar3_k1_cvbench_boxed_lastline  # 85.05
+    - logs/eval/20260831_mvopsd_spar3_k2_cvbench_boxed_lastline  # 86.80
+
+supersedes:
+  previous_offline_default:
+    combined: 85.95
+    protocol: spatialstack + word_boundary, no boxed suffix
+    status: invalidated_as_base_cvbench
+    reason: "默认协议已改为 boxed last-line；旧分不可再写为基座 CV-Bench。"
+
+results:
+  combined: 88.07
+  accuracy_2d: 83.55
+  accuracy_2d_ade: 78.04
+  accuracy_2d_coco: 89.07
+  accuracy_3d: 92.58
+  answered: 99.62
+  json: logs/eval/20260901_qwen35base_cvbench_boxed_lastline/20260901/cvbench/models__Qwen3.5-4B/20260901_145550_results.json
+  vs_spar3_same_protocol:
+    k1_combined: 85.05
+    k1_delta_pp: -3.02
+    k2_combined: 86.80
+    k2_delta_pp: -1.27
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-01T16:10:00+08:00"
+  current_task: "已用 88.07 替换对外基座 CV-Bench 数字 85.95"
+  owner: cursor-window-mvopsd
+  resources: ""
+  next_action: ""
+
+rescore_current_lastline:
+  status: completed
+  completed_at: "2026-09-08T18:10:00+08:00"
+  note: >
+    用户要求把本 dump 交给现行评测（parser=lastline，不认 \\boxed{}）。
+    不重新生成。闭合框 99.55%；末行 2621/2638 为 \\boxed{X}。
+  artifacts:
+    summary: logs/eval/20260901_qwen35base_cvbench_boxed_lastline/rescore_lastline/summary.json
+    samples: logs/eval/20260901_qwen35base_cvbench_boxed_lastline/rescore_lastline/samples.jsonl
+  results:
+    lastline:
+      combined: 0.33
+      accuracy_2d: 0.00
+      accuracy_3d: 0.67
+      answered: 0.91
+    boxed_lastline_replay:
+      combined: 88.07
+      answered: 99.62
+      note: "与源 lmms-eval 88.07 一致，聚合未坏。"
+
+activity_log:
+  - at: "2026-09-08T18:10:00+08:00"
+    what: "现行 lastline 解析重打：0.33 / 作答 0.91%；boxed_lastline 回放仍 88.07。"
+  - at: "2026-09-01T16:10:00+08:00"
+    what: "按用户要求：88.07 替代对外材料中的基座 CV-Bench 85.95；写入 LESSON-031。"
+  - at: "2026-09-01T16:04:00+08:00"
+    what: "评测结束 combined 88.07；两机空闲。"
+  - at: "2026-09-01T14:55:35+08:00"
+    what: "启动 lmms-eval cvbench；wrapper PID 1432636；accelerate 用 conda sr_opsd。"

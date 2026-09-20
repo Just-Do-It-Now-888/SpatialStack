@@ -44,6 +44,13 @@ def main() -> None:
     parser.add_argument("--samples", type=int, default=200)
     parser.add_argument("--image-patch-size", type=int, default=16)
     parser.add_argument("--compare-sft", action="store_true", help="also re-run the SFT image pipeline")
+    parser.add_argument(
+        "--parquet",
+        default="",
+        help="check the image dicts the trainer will actually load, pixel caps included, "
+        "instead of reconstructing them from the plan. Pools that write min_pixels/"
+        "max_pixels must be checked this way or the caps go untested.",
+    )
     args = parser.parse_args()
 
     from verl.utils.dataset.vision_utils import process_image
@@ -57,10 +64,16 @@ def main() -> None:
     if image_processor.patch_size * image_processor.merge_size != ALIGN_FACTOR:
         raise SystemExit(f"expected alignment factor {ALIGN_FACTOR}")
 
-    plan_path = os.path.join(src.REPO_ROOT, args.plan, "plan.jsonl")
     cache_root = os.path.join(src.REPO_ROOT, args.cache_root)
-    with open(plan_path) as handle:
-        records = [json.loads(line) for _, line in zip(range(20000), handle)]
+    if args.parquet:
+        records = records_from_parquet(os.path.join(src.REPO_ROOT, args.parquet))
+    else:
+        plan_path = os.path.join(src.REPO_ROOT, args.plan, "plan.jsonl")
+        with open(plan_path) as handle:
+            records = [json.loads(line) for _, line in zip(range(20000), handle)]
+        for record in records:
+            for frame in record["frames"]:
+                frame["image"] = {"path": os.path.join(cache_root, frame["cache"])}
     random.Random(0).shuffle(records)
 
     token_hist: dict[int, int] = {}
@@ -72,9 +85,10 @@ def main() -> None:
             break
         teacher_tokens = 0
         for view_index, frame in enumerate(record["frames"]):
-            path = os.path.join(cache_root, frame["cache"])
+            image = dict(frame["image"])
+            path = image["path"]
 
-            student_image = process_image({"path": path}, image_patch_size=args.image_patch_size)
+            student_image = process_image(image, image_patch_size=args.image_patch_size)
             with Image.open(path) as handle:  # verl's teacher path, verbatim
                 teacher_image = handle.convert("RGB")
 
@@ -129,6 +143,43 @@ def main() -> None:
             print(f"  {line}")
         raise SystemExit(1)
     print("\nOK: verl's student and teacher image paths agree on every checked view")
+
+
+def records_from_parquet(path: str) -> list[dict]:
+    """Reshape parquet rows into the frame list the checker walks.
+
+    The teacher album is the superset here, so it is what gets checked; the
+    student's views are a subset of the same files and are flagged for the
+    optional SFT comparison.
+    """
+    import pandas as pd
+
+    frame = pd.read_parquet(path)
+    records = []
+    for row in frame.itertuples(index=False):
+        student = {image["path"] for image in row.images}
+        records.append(
+            {
+                "frames": [
+                    {
+                        "image": {k: v for k, v in image.items()},
+                        "cache": image["path"],
+                        "src": image["path"],
+                        "marked": False,
+                        # A parquet row has no still-vs-video provenance left, but
+                        # every path in it is already an extracted still.
+                        "frame_index": None,
+                    }
+                    for image in row.teacher_images
+                ],
+                "view_indices": [
+                    index
+                    for index, image in enumerate(row.teacher_images)
+                    if image["path"] in student
+                ],
+            }
+        )
+    return records
 
 
 def sft_pixel_delta(source_path: str, cache_path: str, image_processor) -> float:

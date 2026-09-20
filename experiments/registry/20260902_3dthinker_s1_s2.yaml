@@ -1,0 +1,818 @@
+experiment_id: 20260902_3dthinker_s1_s2
+title: "3DThinker Stage1 SFT + Stage2 GRPO on MindCube 10K (Qwen2.5-VL-3B)"
+status: stage2_ckpt_cleared
+created_at: "2026-09-02T21:55:00+08:00"
+finished_at: null
+owner: cursor-window-3dthinker
+
+goal: >
+  按官方 README 跑完 3DThinker 两阶段：Stage1 对齐 VGGT latent（10K MindCube CoT），
+  Stage2 用 format/response/latent_sim 做 GRPO，最后 LoRA merge。
+
+hypothesis: null
+
+code:
+  repo: /home/c30084464/Documents/code/3DThinker
+  git_commit: null
+  git_dirty: true
+
+environment:
+  conda_env_stage1: 3DThinker-stage1
+  conda_env_stage2: 3DThinker-stage2-vllm
+  conda_env_stage2_backup: 3DThinker-stage2
+  conda_env_merge: SFT
+  nodes: node-A
+  gpus_per_node: 8
+  gpu_type: H20
+
+model:
+  backbone: Qwen2.5-VL-3B-Instruct
+  model_path: /home/c30084464/Documents/code/3DThinker/models/Qwen2.5-VL-3B-Instruct
+  geometry_encoder: VGGT-1B
+  geometry_encoder_path: /home/c30084464/Documents/code/SpatialStack_OPSD/models/VGGT-1B/model.safetensors
+
+data:
+  training_datasets:
+    - jankin123/3DThinker-10K
+  dataset_version: data_output3d_begin_10k_resized.jsonl
+  n_samples: 10000
+  images: data/other_all_image_resize
+  vggt_features: data/feature_vggt
+
+training:
+  status: running
+  entrypoint: /home/c30084464/Documents/code/3DThinker/run_stage2.sh
+  command: >
+    env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CUDA_VISIBLE_DEVICES
+    WANDB_MODE=online WANDB_PROJECT=3dthinker-training
+    PATH=/home/c30084464/miniconda3/envs/3DThinker-stage2/bin:/usr/bin:/bin
+    setsid nohup bash /home/c30084464/Documents/code/3DThinker/run_stage2.sh
+  parameters:
+    stage1:
+      script: 3dthinker/stage1/train_multi.sh
+      nproc: 8
+      epochs: 10
+      latent_size: 12
+      learning_rate: 1.0e-4
+      per_device_train_batch_size: 1
+      gradient_accumulation_steps: 8
+    stage2:
+      script: 3dthinker/stage2/run_scripts/train_10k.sh
+      nproc: 8
+      epochs: 1
+      learning_rate: 1.0e-5
+      num_generations: 8
+      reward_funcs: [format, response, latent_sim]
+      peft_lora_r: 64
+  artifacts:
+    output_dir: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2
+    stage1_ckpt: /home/c30084464/Documents/code/3DThinker/models/3DThinker-S1-Qwen2.5-VL-3B_mlp6_lr1e-4_latent12
+    stage2_ckpt: /home/c30084464/Documents/code/3DThinker/3dthinker/stage2/checkpoints/rl/3DThinker-S1+S2-Qwen2.5-VL-3B_lr1e-5_gen8
+    merged: /home/c30084464/Documents/code/3DThinker/models/3DThinker-S1S2-Qwen2.5-VL-3B
+    train_log: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/pipeline.log
+  results:
+    metrics: {}
+    summary: "Stage2 GRPO running at 114.27 s/step with real gradients. ISSUE-007/012/013/014 resolved."
+    failure_reason: ""
+  stage2_speed:
+    baseline_s_per_step: 882.91
+    cache_only_s_per_step: 120.71
+    cache_plus_temp_s_per_step: null
+    speedup: ">=3.3, 上界待定"
+    eta_days_5000_steps: null
+    measured_steps:
+      - {step: 1, seconds: 114.27, completion_length: 387.19, reward_std: 0.00504}
+      - {step: 2, seconds: 271.00, completion_length: 992.50, reward_std: 0.66178}
+    eta_note: >
+      **不要引用单步数字**。步 1 的 114.27 s 是在 completion_length=387 下测的，
+      步 2 长度涨到 992.5、单步就变成 271 s，tqdm 滚动估计从 158 h 跳到 287 h。
+      原因是 ZeRO3 下 generate 开 synced_gpus，一步的成本由组内 8 条 rollout 里
+      **最长**那条决定，而 temperature=1.0 恢复采样后 completion 本就更长更散
+      （这正是修复生效的表现，不是新故障）。
+      120.71 s/step 那个中间态是 temperature=1e-6 的贪心短输出，同样不可外推。
+      稳态步速需要 >=10 步的均值，未测出前不给 ETA。
+    baseline_log: logs/20260902_3dthinker_s1_s2/stage2_baseline_nocache_883s.log
+    dominant_cost_before: >
+      use_cache=False 使每个解码步重算整段 ~2100 token；ZeRO3 下 generate 开
+      synced_gpus，8 rank 按组内最长 completion 一起付费。ZeRO3 参数聚合本身不是瓶颈。
+    vllm_rollout:
+      adopted: verified
+      env_verified_at: "2026-09-05T20:06:36+08:00"
+      smoke_verified_at: "2026-09-05T21:34:00+08:00"
+      engine: "V0 进程内引擎（VLLM_USE_V1=0），非默认 V1；见 ISSUE-016"
+      config: "vllm_device cuda:0（与 rank0 共卡）/ gpu_mem 0.35 / max_model_len 12288 / limit_mm_per_prompt image=4"
+      smoke: >
+        3 步 SMOKE（run_stage2.sh SMOKE=1）全过：
+        单步 66.25 s（对比 ISSUE-014 修复后的 883 s，约 13x），
+        grad_norm 1.04/1.11/1.14 非零，reward_std 0.005/0.604/0.007 非零，
+        completion_length 420/559/365，
+        三个 reward 都在：format 1.0/0.81/1.0、response 1.0/0.5/1.0、
+        sim（latent_sim）0.725/0.785/0.715。
+      eta: "5000 步约 92 小时（3.8 天），此前估算 51 天"
+      latent_sim_preserved: >
+        vLLM 只替换 generate()。拿到 completion_ids 后仍走原来的 HF forward
+        产出 extracted_emb / image_embeddings，sim_reward 正常有值可证。
+      env: 3DThinker-stage2-vllm
+      env_stack: "python 3.10, torch 2.6.0+cu124, vllm 0.8.5, Stage1 transformers 4.50.0.dev0 overlay, deepspeed 0.15.4"
+      backup_env: 3DThinker-stage2
+      trainer: VLMGRPOTrainer
+      latent_sim: "kept; vLLM only replaces generate(), HF forward still yields extracted_emb/image_embeddings"
+      vllm_device: cuda:0
+      vllm_gpu_memory_utilization: 0.28
+      vllm_max_model_len: 16384
+      vllm_model_path: /home/c30084464/Documents/code/3DThinker/models/3DThinker-S1-Qwen2.5-VL-3B_mlp6_lr1e-4_latent12_vllm
+      sampling_temperature: 1.0
+      not_using: Qwen2VLGRPOVLLMTrainer
+      blockers_resolved:
+        - "新环境装 vllm 0.8.5，不碰旧 env 的 torch 2.13.0+cu130"
+        - "不换 Qwen2VLGRPOVLLMTrainer；vLLM 只生成 token ids，latent_sim 仍走原 HF forward"
+        - "训练 ckpt 已剥 projector_model -> ..._latent12_vllm（LESSON-034）"
+        - "8 rank 保持不变，vLLM 与 rank0 同卡 colocate，gpu_memory_utilization=0.28"
+      note: >
+        latent_sim 所需的 extracted_emb 是 generate 之后一次独立 forward 拿的。
+        不要把 rollout 切到 Qwen2VLGRPOVLLMTrainer。
+    open_decisions:
+      - "repetition_penalty=1.05 同样是被静默回落进来的（trainer 未声明），当前保持继承，未改"
+      - "gradient_checkpointing=false 可再提速且不改数学（显存 24/95 GiB 有余量），未启用"
+      - "flash_attn 未装（当前 --attn_implementation sdpa），装它有换 torch 的风险，未动"
+      - >
+        max_completion_length=2048 是当前步速的主变量（synced_gpus 按最长 rollout 付费）。
+        下调可封顶最坏步速，但会截断推理、改变实验，未动。
+      - >
+        step1 的 format/response 双 1.0 与 reward_std=0.005 是 8 条 rollout 偶然同质，
+        step2 即变为 0.6875 / 0.375、reward_std 0.662。单步读数不足以判断 reward 饱和。
+
+evaluation:
+  status: completed
+  default_engine: transformers
+  entrypoint: eval/scripts/run_inference_clean.py
+  command: >
+    CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+    python scripts/run_inference_clean.py --model-type qwen2.5vl
+    --model-path /home/c30084464/Documents/code/3DThinker/models/3DThinker-S1-Qwen2.5-VL-3B_mlp6_lr1e-4_latent12
+    --input-file ../MindCube-main/data/prompts/general/MindCube_tinybench_raw_qa.jsonl
+    --output-dir /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/eval_s1
+    --image-root ../MindCube-main/data/ --max-new-tokens 2048 --backend transformers
+  benchmarks: [MindCube-Tiny]
+  parameters:
+    protocol: official_raw_qa
+    n_samples: 1050
+    greedy: true
+    max_new_tokens: 2048
+    attn_implementation: sdpa
+    conda_env: 3DThinker-stage1
+    gpu: "0"
+  artifacts:
+    eval_root: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/eval_s1
+    input_jsonl: /home/c30084464/Documents/code/3DThinker/MindCube-main/data/prompts/general/MindCube_tinybench_raw_qa.jsonl
+    image_root: /home/c30084464/Documents/code/3DThinker/MindCube-main/data
+    model_path: /home/c30084464/Documents/code/3DThinker/models/3DThinker-S1-Qwen2.5-VL-3B_mlp6_lr1e-4_latent12
+  results:
+    metrics:
+      overall_acc: 0.540952380952381
+      correct: 568
+      total: 1050
+      among: 0.56
+      around: 0.656
+      rotation: 0.34
+      unextracted: 67
+    summary: >
+      Stage1 MindCube-Tiny raw_qa greedy 2048 = 54.10% (568/1050).
+      生成 1050/1050，3h12m，18:26 打分结束。67 条抽不出选项
+      （多为 ! 重复或 latent_end 循环）。**此数字不可对外：ISSUE-010 评测 prompt 错。**
+    failure_reason: ""
+    scored_at: "2026-09-04T18:26:37+08:00"
+    eval_json: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/eval_s1/MindCube_tinybench_raw_qa_3dthinker-s1-qwen2.5-vl-3b_mlp6_lr1e-4_latent12_responses_eval_results.json
+  prompt_fixed_hf:
+    status: completed
+    engine: transformers
+    command: bash eval/run_stage1_mindcube_eval_fixed_sharded.sh
+    parameters:
+      protocol: training_matched_begin_prompt
+      n_samples: 1050
+      greedy: true
+      max_new_tokens: 2048
+      attn_implementation: sdpa
+      torch_dtype: bfloat16
+      conda_env: 3DThinker-stage1
+      gpus: "0-7 sharded, batch 1 per process"
+      model_path: /home/c30084464/Documents/code/3DThinker/models/3dthinker-s1-qwen2.5-vl-3b-instruct_begin_align_vggt_mlp6_lr1e-4_latent12
+    artifacts:
+      eval_root: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/eval_s1_fixed
+      eval_json: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/eval_s1_fixed/MindCube_tinybench_raw_qa_stage1_fixed_eval_results.json
+      responses: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/eval_s1_fixed/MindCube_tinybench_raw_qa_stage1_fixed_responses.jsonl
+    results:
+      overall_acc: 0.621904761904762
+      correct: 653
+      total: 1050
+      among: 0.6233333333333333
+      around: 0.72
+      rotation: 0.495
+      summary: >
+        ISSUE-010 修好后 HF 复测 62.19%（653/1050），相对论文 3B S1 的 62.7 差 −0.51。
+        among 62.33 / around 72.00 / rotation 49.50。这是 transformers 口径的 Stage1 数字。
+      scored_at: "2026-09-04T22:18:00+08:00"
+  vllm:
+    status: completed
+    engine: vllm-0.18.0
+    command: bash eval/run_vllm_mindcube_eval.sh
+    conda_env: sr_opsd
+    parameters:
+      protocol: training_matched_begin_prompt
+      n_samples: 1050
+      greedy: true
+      max_new_tokens: 2048
+      max_pixels: 230400
+      tp: 1
+      gpu: "0"
+      model_path: /home/c30084464/Documents/code/3DThinker/models/3dthinker-s1-qwen2.5-vl-3b-instruct_begin_align_vggt_mlp6_lr1e-4_latent12_vllm
+    artifacts:
+      eval_root: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/vllm/eval_s1
+      eval_json: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/vllm/eval_s1/MindCube_tinybench_raw_qa_vllm_eval_results.json
+      responses: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/vllm/eval_s1/MindCube_tinybench_raw_qa_vllm_responses.jsonl
+      manifest: /home/c30084464/Documents/code/3DThinker/logs/20260902_3dthinker_s1_s2/vllm/eval_s1/MindCube_tinybench_raw_qa_vllm_manifest.json
+      vllm_ready_ckpt: /home/c30084464/Documents/code/3DThinker/models/3dthinker-s1-qwen2.5-vl-3b-instruct_begin_align_vggt_mlp6_lr1e-4_latent12_vllm
+    results:
+      overall_acc: 0.6066666666666667
+      correct: 637
+      total: 1050
+      among: 0.6366666666666667
+      around: 0.688
+      rotation: 0.415
+      wall_clock_s: 96.7
+      rows_per_second: 10.864
+      mean_output_tokens: 378.9
+      truncated_rows: 3
+      vs_hf_prompt_fixed: -0.0152
+      vs_paper: -0.0203
+      text_exact_match_vs_hf: 0.003
+      answer_match_vs_hf: 0.594
+      summary: >
+        可选加速路径，不是默认口径。单卡 1.6 min 跑完 1050 题（10.86 行/s），
+        60.67%（637/1050）。相对同协议 HF 62.19% 为 −1.52pp，
+        相对论文 62.7 为 −2.03pp。逐条与 HF：文本相同 0.3%、答案相同 59.4%，
+        中位共同前缀 44 字符——是引擎/视觉前处理差异，不是 prompt。
+        用户 2026-09-04 决定默认仍用修好 prompt 的 transformers。
+      scored_at: "2026-09-04T23:06:19+08:00"
+
+handoff:
+  current_phase: stage2-vllm-env
+  last_updated: "2026-09-05T02:25:00+08:00"
+  current_task: "重建 Stage2 环境 3DThinker-stage2-vllm，并把 vLLM 只接到 generate；latent_sim 仍走 HF forward"
+  owner: cursor-window-3dthinker
+  active_job_id: ""
+  resources: "node-A 8xH20 空闲；正在 conda clone + pip，不占卡"
+  blocker: ""
+  next_action: >
+    训练中（第 264 步）。目标步数按论文的 500 步收敛判据，不跑满 5000 步。
+    到 500-600 步后停，评测 checkpoint-100/200/300/500，曲线走平即取该点。
+    不需要任何工程改动。旧环境 3DThinker-stage2 留作 torch-2.13 备份。
+
+issues:
+  - id: ISSUE-019
+    status: resolved
+    symptom: >
+      计划用 LLaMA-Factory（SFT 环境）合并 Stage2 LoRA 后评测，
+      但该路径会静默产出错误模型，两个独立原因。
+    evidence: >
+      1) SFT 环境是原版 transformers 4.51.1，其 Qwen2_5_VLForConditionalGeneration
+         没有 projector_model 属性，基座里那 28 个 projector_model.* 张量
+         会被当作 unexpected key 丢弃，不报错。
+      2) 基座 tie_word_embeddings=True 且无独立 lm_head（与 embed_tokens 共享张量），
+         而 adapter 把 lm_head 列为 LoRA target。
+         PEFT 自身警告：tied_target_modules=['lm_head'] 在 merge 时会出问题。
+         合并会把输出投影的 LoRA delta 写进共享的输入 embedding。
+    root_cause: >
+      合并路径依赖的模型类与训练时不同，且绑定权重下的 merge 语义与训练不一致。
+    solution: >
+      不做离线合并。给 eval/src/inference/utils.py 的 ModelLoader 加分支：
+      检测到 adapter_config.json 就按其中的 base_model_name_or_path 加载基座，
+      再 PeftModel.from_pretrained 挂载 adapter（不 merge），
+      LoRA 只在前向生效，语义与训练完全一致。
+      3DThinker-stage1 环境用 pip install --no-deps peft==0.17.1（与训练同版本），
+      不触碰已验证的 transformers。
+      已验证 adapter 里的 lm_head.base_layer.weight 与基座 embed_tokens 逐位相等，
+      挂载不会改变基座数值。
+    prevention: >
+      跨环境合并 LoRA 前，先确认目标环境的模型类能识别全部自定义张量；
+      base 若 tie_word_embeddings=True 且 lm_head 是 LoRA target，一律不要 merge。
+  - id: ISSUE-019
+    status: open
+    symptom: >
+      Stage2 GRPO 训练后 MindCube 评测相比 Stage1 基座没有稳定增益，部分维度反而下降。
+      最初怀疑是 vLLM 接入引入的实现问题。
+    evidence: >
+      在 grpo_trainer.py / qwen_module.py 插桩跑 smoke（3~4 步，8 卡 x 8 rollout）：
+      (1) H3：6 组 rollout 中有 5 组的 format_reward 与 response_text_reward 在组内
+          8 个样本上完全相同（std=0），唯一有差异的是 sim_reward，组内 std 仅
+          0.002~0.010；advantage=(r-mean)/(std+1e-4) 把这点差异放大成 ±1.5。
+      (2) H6：同一组内 format/response 都相同的情况下，狂刷 413 个 <|latent_end|>
+          的补全 sim=0.9082，正常作答的补全 sim=0.7346。
+      (3) H10：32 个样本上 extracted_emb 的位置间方差与 sim 完全分离——
+          退化补全 pos_var≈0.50~0.63 → cos_sim≈0.80~0.82 → reward≈0.908；
+          正常补全 pos_var≈8.7~11.4 → cos_sim≈0.40~0.49 → reward≈0.70~0.74。
+      (4) 对照实验：USE_VLLM=False 走原 HF generate 路径，退化完全一致
+          （32 个 rollout 中 6 个刷 <|latent_end|>，sim 同为 0.9082）。
+      (5) H1/H2/H4/H5 均被否定：vLLM 权重同步正常（sum 每步变化且与 incoming 一致）、
+          latent token 查找无 fallback、rollout 8/8 互不相同、分布式 prompt 对齐 48/48 正确。
+    root_cause: >
+      sim_reward 用 cosine_similarity(decoder_feature, feature_3d).mean() 对 4x1374 个
+      patch 求平均，该目标在 decoder_feature 沿位置维度退化为常量时取得最大值——
+      常量方向与几乎所有 patch 都有正余弦，而真实多样化的 embedding 只与部分 patch 对齐、
+      与其余 patch 失配，平均值反而更低。于是"latent 块塌缩成无信息常量"是 sim_reward 的
+      全局最优，构成 reward hacking。叠加 (1)：多数训练步里 sim_reward 是唯一梯度来源，
+      每一步都在把策略往 latent 塌缩推，累积数百步后 Stage1 能力被破坏。
+      与 vLLM 无关，HF 路径同样存在。
+    solution: >
+      待定，需要研究层面决策（见 handoff）。候选：对退化 latent 块做门控/置零、
+      把 mean-cosine 换成对位置塌缩不敏感的度量、或降低 sim_reward 权重使其不再主导 advantage。
+    prevention: >
+      连续型辅助 reward 在 GRPO 里必须检查"组内其他 reward 饱和时它是否成为唯一信号"，
+      以及"它的全局最优是否对应退化输出"。上线前用 smoke 跑几步，
+      打印每个 reward function 的组内 std 与 n_unique。
+  - id: ISSUE-018
+    status: resolved
+    symptom: >
+      vLLM 引擎初始化成功后，第一次 generate 就崩：
+      ValueError: Attempted to assign 391 x 12 = 4692 multimodal tokens to 9372 placeholders。
+      占位符数约为实际视觉 token 的两倍（每图 781 ≈ 391 + 390）。
+    evidence: >
+      单独验证同一条样本，HF processor 与 vLLM input_preprocessor 结果完全一致
+      （prompt_len 1775，image token 1564，每图 391），说明拼装逻辑本身没错。
+      进一步实测：调用 processor 前 prompts_text[0] 有 4 个 <|image_pad|>，
+      调用后变成 1564 个。
+    root_cause: >
+      Qwen2.5-VL 的 processor 会**就地改写**传入的 text 列表，
+      把每个 <|image_pad|> 展开成每 patch 一个 token。
+      trainer 里 prepare_model_inputs 在 _generate_with_vllm 之前调用，
+      于是 vLLM 拿到的是已展开的文本，又按自己的规则展开了一次
+      （第一个 pad 展成 391，剩下 390 个原样留下 → 781）。
+    solution: >
+      在 prepare_prompt 之后、prepare_model_inputs 之前用 list(prompts_text) 存一份快照，
+      把快照传给 _generate_with_vllm。浅拷贝即可，因为 processor 是重新绑定列表元素。
+    prevention: >
+      HF processor 对 text 参数不保证无副作用。
+      任何需要复用原始 prompt 文本的地方（vLLM、日志、二次分词）都要先自己拷一份。
+  - id: ISSUE-017
+    status: resolved
+    symptom: >
+      vLLM V0 引擎起不来：ValueError: No available memory for the cache blocks。
+      日志显示 total 95.08GiB x 0.28 = 26.62GiB，
+      model weights 7.15GiB，activation peak 27.46GiB，KV Cache 剩 -8.13GiB。
+    evidence: >
+      同样参数在 V1 引擎下能分到 365,872 token 的 KV cache。
+      把 limit_mm_per_prompt 从 8 降到 4、max_model_len 从 16384 降到 8192 后，
+      activation peak 从 27.46GiB 降到 14.07GiB，KV 变成 5.27GiB。
+    root_cause: >
+      V0 的 determine_num_available_blocks 用 total*util - peak_memory 反推 KV，
+      而 profile_run 会按 max_model_len 和 limit_mm_per_prompt 的**上限**跑一次前向。
+      limit_mm_per_prompt 当时写死 8 张图，但 10k 数据每条最多 4 张（实测 2/3/4 分布），
+      等于按两倍真实规模去估显存。V1 的显存核算方式不同，所以没暴露。
+    solution: >
+      limit_mm_per_prompt 改成 {"image": 4}；vllm_max_model_len 12288、
+      vllm_gpu_memory_utilization 0.35 → KV cache 11.93GiB，对 4 图 + 2048 补全约 3 倍余量。
+    prevention: >
+      limit_mm_per_prompt 要按数据集实测上限填，不要凭感觉放大——
+      它不是一个"上限保护"，而是直接决定 profiling 的显存开销。
+  - id: ISSUE-016
+    status: resolved
+    symptom: >
+      8 卡 torchrun 下 vLLM 初始化卡死 600 秒后报
+      "The client socket has timed out after 600000ms while trying to connect to (10.10.10.70, 43437)"，
+      整个训练随之失败。单进程冒烟同样参数却正常。
+    evidence: >
+      日志里 vLLM 打了 "We must use the `spawn` multiprocessing start method"，
+      随后 EngineCore 子进程去连一个不存在的 TCPStore。
+      超时地址是 vLLM 自建的 store，不是 torchrun 的 master_port 12346。
+    root_cause: >
+      vLLM 0.8.5 默认 V1 引擎，EngineCore 跑在 spawn 出的独立进程里。
+      该子进程继承了 torchrun 注入的 TORCHELASTIC_USE_AGENT_STORE，
+      于是 init_process_group 认为该以客户端身份接入 agent store 而不是自建 server，
+      连不上就死等。附带问题：V1 把引擎放在另一进程，
+      每步同步 LoRA 权重要用的 driver_worker.model_runner.model.load_weights 根本够不着。
+    solution: >
+      _init_vllm 里设 VLLM_USE_V1=0 走进程内 V0 引擎；
+      构造 LLM 期间用 patch.dict 临时清掉 RANK/WORLD_SIZE/MASTER_*/TORCHELASTIC_* 等变量，
+      退出后自动还原。配合原有的 get_world_size→1 patch，8 卡训练组对 vLLM 表现为单卡。
+      已确认 V0 下 inner model 是 Qwen2_5_VLForConditionalGeneration 且 load_weights 可达。
+    prevention: >
+      在 torchrun 里内嵌任何会 spawn 子进程的推理引擎时，
+      先确认子进程不会继承 TORCHELASTIC_*；
+      单进程冒烟通过不代表分布式下能通过，二者必须分别验。
+  - id: ISSUE-015
+    status: resolved
+    symptom: >
+      新环境 3DThinker-stage2-vllm 里 vLLM 引擎起不来：
+      RuntimeError: Triton only support CUDA 10.0 or higher, but got CUDA version: 13.0，
+      随后 Engine core initialization failed。
+    evidence: >
+      栈顶在 triton/backends/nvidia/compiler.py:60 ptx_get_version。
+      env 里镜像全局导出 TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas（CUDA 13.0），
+      而 env 自带 triton/backends/nvidia/bin/ptxas 是 12.4.99。
+    root_cause: >
+      新环境按 vLLM 0.8.5 的要求换成 torch 2.6.0+cu124 + triton 3.2.0，
+      triton 3.2 的 ptx_get_version 只映射 major 10/11/12，遇到 13 直接抛错。
+      旧环境 torch 2.13+cu130 的 triton 认得 CUDA 13，所以此前从未触发。
+    solution: >
+      run_stage2.sh 里 unset 全部 TRITON_*_PATH，让 triton 用自带的 12.4 工具链。
+      同时 export PYTHONNOUSERSITE=1（LESSON-030 同类）。
+    prevention: >
+      换 torch/CUDA 小版本后，先跑 envs/smoke_stage2_vllm.py，
+      不要只看 pip 是否装完或 import 是否通过。
+  - id: ISSUE-010
+    status: resolved
+    symptom: >
+      Stage1 MindCube-Tiny 54.10%，低于论文 3B S1 的 62.7（−8.6）。
+      Rotation 34.0 vs 44.0、Among 56.0 vs 64.8、Around 65.6 vs 72.4。
+    evidence: >
+      评测 prompt 与训练不一致。训练侧 3dthinker/stage1/src/task.py:142
+      用 text_input（仅 question）+ task.py:134 的 begin PROMPT；
+      评测侧 eval/src/inference/engines/qwen_engine.py:381 的正确分支是
+      get_content_after_question(prompt_complete)+PROMPT，但门控是
+      `"3dthinker" in os.path.basename(model_path)`，大小写敏感。
+      我们目录名 3DThinker-S1-... 判为 False，故喂了完整
+      [Task]/[Answer Instruction]/[Question] 题面且缺 begin 指令。
+      官方参考 dump 的模型 tag 是全小写 work-3dthinker-...，会命中该分支。
+    root_cause: >
+      prompt 分支未触发。两处门控都是大小写敏感的 `"3dthinker" in basename`，
+      且 PROMPT 变体由全路径是否含 "begin"/"end" 决定；我们的路径两者都不含，
+      即便命中分支也会选到 mid 版 PROMPT，而训练用的是 begin 版（task.py:134）。
+      已排除：打分口径（全文 54.10 vs 仅 <answer> 54.00）、projector、flash-attn、fp16（见 ISSUE-008/009）。
+      定量：两侧都正常输出的 990 行上官方 66.46% vs 我们 57.37%，差 9.09pp，差距全部集中在此。
+      参考基准可信：data/ 里官方 dump 打分 62.67%（among 64.83/rotation 44.00/around 72.40）
+      与论文 Table 1 的 62.7/64.8/44.0/72.4 完全一致。
+    solution: >
+      1) qwen_engine.py 两处 basename 改 .lower()；
+      2) 建官方式命名软链 models/3dthinker-s1-...-instruct_begin_align_vggt_... 以选中 begin 版 PROMPT；
+      3) 按训练格式重跑（eval/run_stage1_mindcube_eval_fixed_sharded.sh，8 卡分片）→ **62.19%**
+         （653/1050；among 62.33 / around 72.00 / rotation 49.50），相对论文 −0.51。
+      vLLM 同协议后为 60.67%（见 ISSUE-011），那是引擎差不是 prompt。
+    prevention: >
+      评测前必须把渲染出的 user prompt 与训练 collate 的 prompt 逐字节对一次。
+      vllm_infer.py 在 auto 且目录名无 begin/end 时直接报错，不再静默退到 mid。
+  - id: ISSUE-011
+    status: resolved
+    symptom: vLLM 0.18 无法直接加载 Stage1 checkpoint
+    evidence: >
+      ValueError: no module or parameter named projector_model in
+      Qwen2_5_VLForConditionalGeneration. 权重 index 里有 28 个 projector_model.*，
+      全在 model-00002-of-00002.safetensors。
+    root_cause: >
+      projector 只参与 Stage1 的 VGGT sim_loss（trainer_multi.py），推理不用。
+      transformers 加载会丢弃未知键；vLLM 的 loader 对多余键直接抛错。
+    solution: >
+      eval/make_vllm_ready_ckpt.py 剥离 projector（第 1 分片软链、第 2 分片重写，
+      新增约 2.4G）→ models/..._latent12_vllm。run_vllm_mindcube_eval.sh 启动前检查
+      index，发现 projector 立刻退出并提示该脚本。
+    prevention: 给 vLLM 的 3DThinker 权重必须先过 make_vllm_ready_ckpt.py
+  - id: ISSUE-009
+    status: open
+    symptom: 我们 1050/1050 输出的 latent 块为空；官方参考 dump 990/1050 含 8 个 `<|latent_pad|>`
+    evidence: >
+      1) projector 已排除：projector_model 仅出现在 3dthinker/stage1/src/trainer_multi.py:44
+         的 compute_loss（与 VGGT 特征算 sim_loss），transformers modeling 源码从不引用它，
+         加载时被丢弃对推理无影响。
+      2) flash-attn 已排除：modeling_qwen2_5_vl.py:1260/1272/1284 三分支中，flash 只在训练时
+         选 forward_ulysses（序列并行），生成时用 forward_normal；sdpa 落到 else 的普通注意力，
+         与生成路径语义等价。
+      3) 生成期不注入 latent：latent 循环门控为 `config.stage == 'stage2' and not generate_mode`
+         (modeling:2163)，stage1 生成不会注入，8 个 pad 必须是模型自己学出来的。
+      4) 但发布代码把 latent_pad 从 labels 里 mask 掉了：utils.py:347
+         `row[row == img_token_idx] = -100`，main_multi.py:196 传入的正是 latent_token_idx(151665)，
+         即"发出 latent_pad"从未被监督。我们 ckpt 的 0 个 pad 符合这份代码，官方的 8 个不符合。
+      5) prompt 修复后 smoke 仍为 0 个 pad，故与 prompt 无关。
+    root_cause: >
+      官方发布的 checkpoint 不是用这份发布的 stage1 标签逻辑训出来的（label mask 或流水线版本不同）。
+      属于上游 release 的可复现性缺口，非本地 bug。
+    solution: 待定 —— prompt 修好后 HF 62.19% 已贴近论文；vLLM 同样输出空 latent 块。不阻塞推理。
+    prevention: 复现前先用官方 dump 的输出格式（特殊 token 计数）反推训练标签逻辑是否自洽
+  - id: ISSUE-008
+    status: resolved
+    symptom: 68/1050 抽不出选项，其中 60 条输出是纯 `!` 重复，8 条 `<|latent_end|>` 死循环
+    evidence: >
+      官方参考 dump 里同样有 60 条 `!` 开头的行，且与我们的 60 个题号**完全重合**，
+      说明与本地 dtype 无关，是这批样本自身的性质（官方 62.67% 也是带着这 60 个 0 分算出来的）。
+      另查到 ConfigManager.get_default_config('qwen2.5vl') 硬编码 'torch_dtype': 'float16'
+      而 ckpt config.json 是 bfloat16，口径确实不正，但不是 `!` 的成因。
+    root_cause: 不是 fp16。`!` 行为在官方同样存在，为数据/样本层面的既有退化
+    solution: 已把默认 dtype 改为 bfloat16（口径对齐 ckpt）；`!` 行按官方口径保留计 0 分
+    prevention: 定位退化输出前，先与官方逐题 dump 对齐题号，避免误归因到本地配置
+  - id: ISSUE-015
+    status: open
+    symptom: >
+      用户要求「单卡 + batch size 1」跑 Stage2。两层都不成立：
+      (a) per_device_train_batch_size=1 单卡直接抛 ValueError，启动不了；
+      (b) 退到单卡 batch=8 后在 generate 的第一次 prefill 就 OOM，
+      单次申请 160,308,396,032 bytes（149.30 GiB），而卡只有 95.08 GiB。
+    evidence: >
+      (a) grpo_trainer.py:525-532 校验
+      `global_batch_size = per_device_train_batch_size * num_processes`，
+      **不含 gradient_accumulation_steps**。单卡 batch=1 时它等于 1，
+      `possible_values = [n for n in range(2, 2) ...]` 是空列表，
+      任何 num_generations 都过不了。
+      (b) traceback: grpo_trainer.py:778 generate → generation/utils.py:3317 _sample
+      → qwen2_5vl_monkey_patch.py:99 self.visual() → modeling_qwen2_5_vl.py:319
+      F.scaled_dot_product_attention。
+      日志 stage2_1gpu_oom_batch8.log。
+    root_cause: >
+      两条独立原因。
+      (a) `per_device_train_batch_size` 在这个 trainer 里是 **completion 数不是 prompt 数**。
+      compute_loss 做 `rewards.view(-1, num_generations)`（grpo_trainer.py:931），
+      一个 micro-batch 必须装下整数个 GRPO 组。batch=1 单卡时组大小退化为 1，
+      组内方差恒 0 → 零 advantage，与 ISSUE-014 的 temperature 1e-6 同一个死法。
+      所以单卡的唯一合法形式是 per_device_train_batch_size = num_generations。
+      (b) Qwen2.5-VL 的 vision tower 吃 **packed 2D 序列**
+      （modeling_qwen2_5_vl.py:527 `seq_len, _ = hidden_states.size()`，无 batch 维），
+      一个 batch 内所有图像的 patch 拼成一条长度 S 的序列；
+      modeling_qwen2_5_vl.py:313 为它 materialize `[1, S, S]` 的 bool mask。
+      S ∝ batch，故 **vision attention 显存是 O(batch²)**。
+      反推 sqrt(1.6031e11) → S≈400,387，即每条 rollout 约 50,048 patch：
+      8 卡 batch=1 时 S≈50k、mask 2.3 GiB（与实测每卡 24 GiB 相符）；
+      单卡 batch=8 时 S≈400k、mask 149.3 GiB。是 64 倍不是 8 倍。
+    solution: >
+      未解决。已量化的候选（mask 部分按 (batch×50048)² bytes 估，另加模型 25.87 GiB）：
+      batch=8 → 149.3 GiB ✗；batch=4 → 37.3 GiB（合计约 63 GiB，可行但紧）；
+      batch=2 → 9.3 GiB（合计约 35 GiB，宽松）。
+      但 per_device_batch 必须等于 num_generations，所以降 batch 就是降 GRPO 组大小，
+      会改变实验语义（组大小 4 或 2 的组内方差估计显著变差）。
+      真正的修法是让 vision tower 对同一 prompt 的 8 条 rollout 只算一次再复制 embedding
+      ——8 条 rollout 的图像完全相同，现在是算了 8 遍同样的东西。
+      这能把 mask 从 (8S)² 降到 S²（64 倍），且不改变实验语义，但要改模型 forward。
+    prevention: >
+      给 Qwen2.5-VL 这类 packed-vision 模型估显存时，**不能按 batch 线性外推**。
+      「decode 是 memory-bound 所以 batch 8 几乎不加钱」只对语言模型成立，
+      vision tower 那一段是 O(batch²)。启动前先按 (batch×每条 patch 数)² 算一遍 mask。
+  - id: ISSUE-014
+    status: resolved
+    symptom: >
+      两件事同源：(a) 单步 882.91s，5000 步估 51 天；
+      (b) reward_std 恒 0.0、loss 0.0、grad_norm 0.0，即 Stage2 不产生任何梯度。
+    evidence: >
+      stage2.log 首行 warning:
+      "generation_config default values have been modified to match model-specific
+      defaults: {'use_cache': False, 'temperature': 1e-06, 'repetition_penalty': 1.05, ...}"
+      grpo_trainer.py:482 声明 do_sample=True / temperature=1；
+      models/Qwen2.5-VL-3B-Instruct/generation_config.json 带 temperature 0.000001，
+      Stage1 存权重时继承进 ckpt。
+      基线 run（stage2_baseline_nocache_883s.log）step1 reward_std=0.0 grad_norm=0.0。
+    root_cause: >
+      transformers generation/utils.py:1596-1606 会把「仍等于 GenerationConfig 默认值」
+      的字段整体回落到 model.generation_config。trainer 传的 use_cache 未设（默认 True）
+      与 temperature=1（默认 1.0）都命中该条件，于是被换成模型侧的 False 与 1e-6。
+      use_cache=False 让 336 步解码每步重算整段 ~2100 token（O(n^2)），
+      且 ZeRO3 下 generate 开 synced_gpus，8 个 rank 按最长 completion 一起付费。
+      temperature=1e-6 让 8 条 generation 几乎相同，组内方差为 0，
+      advantages=(r-mean)/(std+1e-4) 全零 → 零梯度。
+    solution: >
+      kwargs 在该回落之后才应用（utils.py:1613），故在 grpo_trainer.py 的
+      generate() 调用点显式传 use_cache=True 与 temperature=1.0。
+      训练前反向仍用 model.config.use_cache=False，gradient checkpointing 不受影响。
+      实测 882.91 → 120.71（仅 cache）→ 114.27 s/step；
+      grad_norm 0.0 → 1.177，reward_std 0.0 → 0.00504。
+    prevention: >
+      改 GenerationConfig 字段前先看 generate 首个 warning 打了哪些 key 被回落；
+      GRPO 类算法启动后必须确认 reward_std>0 且 grad_norm>0，
+      只看 loss 会被误导（首步 loss 本就≈0，因为 ratio=1 且 advantages 组内和为 0）。
+  - id: ISSUE-013
+    status: resolved
+    symptom: >
+      ISSUE-007 修好后第一次 generate + 三个 reward + optimizer.step 都过了，
+      紧接着 lr_scheduler.step() 崩掉，仍停在 0/5000。
+    evidence: >
+      stage2.log 00:25 rank0-7 ValueError: zip() argument 2 is longer than argument 1
+      torch/optim/lr_scheduler.py:296 _update_lr（torch 2.13.0+cu130）
+    root_cause: >
+      Torch 2.10+ 给 zip 加了 strict=True。DeepSpeed 会丢掉 LoRA 里空的
+      no-decay param group，scheduler 仍按创建时的 base_lrs 长度取 lr。
+    solution: >
+      qwen2_5vl_monkey_patch.monkey_patch_lr_scheduler_param_groups：
+      step 前把 base_lrs / lr_lambdas 裁到当前 optimizer.param_groups 长度。
+    prevention: PEFT+ZeRO3 启动后必须看到 step>=1；看见 zip strict 先对 param group 数。
+  - id: ISSUE-012
+    status: resolved
+    symptom: >
+      重启 Stage2 后 8 个 rank 在 import qwen_module 时
+      CUDA error: invalid device ordinal，driver 立刻退出。
+    evidence: >
+      stage2.log 00:03 rank3 exit 1；qwen_module.py:150
+      .to(f"cuda:{_local_rank}")。本窗口 CUDA_VISIBLE_DEVICES=0，
+      torch.cuda.device_count()=1，LOCAL_RANK 1-7 越界。
+    root_cause: >
+      从评测/agent shell 继承了 CUDA_VISIBLE_DEVICES=0（LESSON-030 同类）。
+      torchrun --nproc=8 并不覆盖该变量，8 个进程都只看见 1 张卡。
+    solution: >
+      run_stage2.sh 在可见卡 <8 时 unset CUDA_VISIBLE_DEVICES。
+      顺手把 sim_reward 的 .to(cuda:0) 改成 projector 所在设备，
+      VGGT 特征路径从相对 ../../data 改为向上查找仓库根的 data/feature_vggt
+      （原相对路径指向不存在的 stage2/data/feature_vggt，reward 会被 except 吃成 0）。
+    prevention: >
+      启动命令必须 env -u CUDA_VISIBLE_DEVICES；脚本自己也要清。
+      看见 invalid device ordinal 先打印 CUDA_VISIBLE_DEVICES 和 device_count。
+  - id: ISSUE-007
+    status: resolved
+    symptom: Stage2 第一次 generate 崩掉，进度停在 0/5000
+    evidence: >
+      stage2.log 01:55 rank4 IndexError in get_rope_index:
+      mask shape [2083] vs indexed tensor [2082]
+    root_cause: >
+      GRPO trainer 因 gradient checkpointing 设 model.config.use_cache=False。
+      generate 每步仍给 attention_mask 追加一列，但不更新 cache_position
+      （use_cache 为 false 时跳过）。prepare_inputs_for_generation 用旧的
+      cache_position 切片 input_ids，得到长度 P，而 mask 已是 P+1。
+      ZeRO3 monkey patch 因 past_key_values.get_seq_length()==0 每步重算
+      rope，于是 get_rope_index 用 [2083] 的 mask 去索引 [2082] 的 ids。
+    solution: >
+      1) modeling_qwen2_5_vl.py get_rope_index：mask 与 ids 长度不一致时裁/补到同长。
+      2) 原始 forward 与 qwen2_5vl_monkey_patch.py 在算 rope 前同样对齐 mask。
+      不改成 wrap-original-forward（ZeRO3 要求所有 rank 都进 visual() collective）。
+    prevention: 启动后必须看到 step>=1 的 loss 才算 Stage2 真正跑起来；见 LESSON-035
+  - id: ISSUE-006
+    status: resolved
+    symptom: Zero3 monkey patch 的 qwen2_5vl_forward 不接受 generate_mode，第一步 compute_loss 崩
+    evidence: stage2.log TypeError qwen2_5vl_forward() got an unexpected keyword argument generate_mode
+    root_cause: 官方 VLM-R1 patch 按 4.49 签名写；Stage1 transformers 多了 generate_mode 与 latent 参数
+    solution: 在 monkey patch 签名里补 generate_mode / latent 相关 kwargs
+    prevention: 换自定义 transformers 后对一下 generate() 实际传入的 kwargs
+  - id: ISSUE-005
+    status: resolved
+    symptom: AutoProcessor 找不到 preprocessor_config.json
+    evidence: Stage1 save 只有 tokenizer 与权重，没有 preprocessor/chat_template
+    root_cause: Stage1 Trainer.save_model 未拷贝基座 processor 文件
+    solution: 从 Qwen2.5-VL-3B-Instruct 拷 preprocessor_config.json 与 chat_template.json
+    prevention: Stage1 结束后核对 processor 文件再开 Stage2
+  - id: ISSUE-004
+    status: resolved
+    symptom: qwen_module 在 import 时用相对路径 ../../models/... 找不到 Stage1 ckpt
+    evidence: FileNotFoundError 相对 open-r1-multimodal 的 cwd
+    root_cause: 硬编码相对路径，且 .to(cuda:0) 会让 8 个 rank 全打到 GPU0
+    solution: 向上查找 models/ 目录；设备用 LOCAL_RANK
+    prevention: 模块级加载权重必须用绝对路径与 local rank
+  - id: ISSUE-003
+    status: resolved
+    symptom: Stage2 环境无 flash_attn，官方默认 attn_implementation=flash_attention_2 无法加载
+    evidence: 3DThinker-stage2 python 报 ModuleNotFoundError flash_attn；Stage1 也无 flash_attn 但已训完
+    root_cause: setup.sh / requirements_stage2 未安装 flash-attn；VLMGRPOTrainer 默认 flash_attention_2
+    solution: train_10k.sh 显式 --attn_implementation sdpa
+    prevention: 启动前 import flash_attn；没有就改 sdpa 并记入 registry
+  - id: ISSUE-002
+    status: resolved
+    symptom: Stage1 在 0/1560 崩溃 KeyError pixel_values
+    evidence: stage1.log main_multi.py:178 assistant_batch['pixel_values']
+    root_cause: 发布的 10K 数据 assistant 只有文本 latent，没有图；main_multi 仍走旧的 assistant image collate。官方 main.py 已注释掉这段。
+    solution: 把 main_multi collate 对齐 main.py；compute_loss 先 pop 掉 image_out_mask 再 super()
+    prevention: 多卡入口改动必须与单卡 main.py 对一下 collate
+  - id: ISSUE-001
+    status: resolved
+    symptom: ranks 1-7 crashed with CUDA invalid device ordinal; only GPU 0 loaded
+    evidence: "vggt_rank1.log RuntimeError CUDA error: invalid device ordinal"
+    root_cause: "CUDA_VISIBLE_DEVICES=$rank left a single visible GPU, but extract called set_device(rank)"
+    solution: always use cuda:0 inside each sharded process
+    prevention: never index CUDA devices by shard rank when CUDA_VISIBLE_DEVICES already isolates a card
+
+activity_log:
+  - at: "2026-09-06T03:35:00+08:00"
+    what: >
+      按用户要求，目标改为跑到 600 步后评测全部 checkpoint（100-600 共 6 个）。
+      新增 eval/run_stage2_mindcube_eval_steps.sh（多 step 循环，协议与
+      run_stage1_mindcube_eval_fixed_sharded.sh 完全一致，可直接对 62.19%）
+      和 eval/watch_and_eval_at_step.sh（等 checkpoint-600 的 trainer_state.json
+      落盘 → 停训练 → 自动评测）。watcher 已启动，pid 2400301，TARGET=600。
+      8 条样本端到端冒烟通过：adapter 加载正确、prompt 命中 begin 分支、
+      分片/合并/打分/汇总全通。冒烟产物已清理。
+      单次全量评测实测约 22.6 min，6 个 checkpoint 约 2.3 h。
+  - at: "2026-09-06T03:05:00+08:00"
+    what: >
+      纠正一个估算前提：5000 步来自 --num_train_epochs 1
+      （10000 条 ÷ 每步 2 条不重复样本），不是收敛判据。
+      原论文陈述 3DThinker 在 500 步内接近最优（Fig. 7），
+      并称单卡 H200 batch=1 下 SFT 21.84 h、RL 12.85 h 收敛。
+      按 500 步计，本 run 约 8.3 小时，而非此前记录的 69 小时。
+      当前第 264 步，sim_reward 单调上升 0.692→0.705→0.713→0.723→0.742，
+      已在收敛区间。决定：跑到 500-600 步，评测 100/200/300/500 后取平台点。
+      顺带印证性能分析：8 卡 500 步 8.3 h vs 论文单卡 12.85 h，
+      8 倍硬件仅换 1.5 倍速度，ZeRO-3 通信浪费判断成立，
+      但总时长已降至 8 h 量级，不再值得优化。
+  - at: "2026-09-06T23:09:00+08:00"
+    what: >
+      按用户要求清空 Stage2 RL checkpoint 树（约 15G）：删除 gen8 的
+      checkpoint-100…600、gen8_smoke、gen8_1gpu。
+      Stage1 基座 models/3DThinker-S1-Qwen2.5-VL-3B_mlp6_lr1e-4_latent12
+      与 ..._vllm 未动。训练日志与 eval_s2 评测产物保留。
+      重训前需处理 ISSUE-019（sim_reward reward hacking）。
+  - at: "2026-09-05T22:33:18+08:00"
+    what: >
+      正式启动 Stage2 GRPO 5000 步。driver pid 2207529，
+      日志 3DThinker/logs/20260902_3dthinker_s1_s2/stage2.log，
+      输出目录 3dthinker/stage2/checkpoints/rl/3DThinker-S1+S2-Qwen2.5-VL-3B_lr1e-5_gen8（启动前为空）。
+      8 卡独占，save_steps 100，WANDB offline。
+      前 14 步实测 49.80 s/step，ETA 约 69 小时（2.9 天）。
+      显存 GPU0 49 GiB（训练 + vLLM 共卡）、其余各 29 GiB，上限 95 GiB，余量充足。
+      指标健康：grad_norm 0.98-1.99、reward_std 0.005-0.49、
+      sim_reward 稳定 ~0.70、kl 0.004-0.006、completion_length 340-450。
+  - at: "2026-09-05T21:34:00+08:00"
+    what: >
+      Stage2 vLLM rollout 打通并通过 3 步冒烟。单步 883 s → 66.25 s（约 13x），
+      latent_sim 保留且 sim_reward 正常。
+      过程中修掉 4 个问题：ISSUE-015（TRITON_*_PATH 指向 CUDA 13）、
+      ISSUE-016（V1 引擎 spawn 子进程继承 TORCHELASTIC_* 导致 600 s 超时，
+      且 load_weights 跨进程不可达 → 改用 V0 进程内引擎）、
+      ISSUE-017（limit_mm_per_prompt=8 让 V0 profiling 峰值 27.46 GiB，KV 分不到内存）、
+      ISSUE-018（HF processor 就地展开 prompts_text，vLLM 二次展开导致占位符翻倍）。
+      另外 torch 2.6 没有 LRScheduler._update_lr，ISSUE-013 的补丁改成按版本自适应。
+      正式训练尚未启动，等确认。
+  - at: "2026-09-05T20:10:00+08:00"
+    what: >
+      3DThinker-stage2-vllm 建成并验证：python 3.10.21 / torch 2.6.0+cu124 /
+      vllm 0.8.5 / transformers 4.50.0.dev0（Stage1 editable）/ deepspeed 0.15.4 / peft 0.17.1。
+      vLLM 冒烟通过（ISSUE-015 修掉 TRITON_*_PATH 指向 CUDA 13 的问题）。
+      pip 只报 open-r1 声明的 transformers==4.49.0 冲突，属预期（overlay 4.50.dev0）。
+      训练未重拉，8 卡仍空闲。
+  - at: "2026-09-05T02:25:00+08:00"
+    what: >
+      用户要求重建 Stage2 环境，且 latent_sim 必须保留。
+      新建 conda env 3DThinker-stage2-vllm（克隆旧 Stage2 再换 torch 2.6 + vLLM 0.8.5，
+      再 overlay Stage1 transformers 4.50.dev0）。旧 3DThinker-stage2 不动。
+      VLMGRPOTrainer 只把 generate() 换成 vLLM；之后的 HF hidden-state forward
+      与 format/response/latent_sim 三个 reward 原样保留。温度仍强制 1.0（ISSUE-014）。
+      8 卡空闲，训练未重拉，等环境 verify。
+  - at: "2026-09-05T01:22:12+08:00"
+    what: >
+      用户要求大幅提效。查明 883s/step 的主因不是 ZeRO3（unwrap_model_for_generation
+      已一次性 GatheredParameters）而是 use_cache=False 的 O(n^2) 解码（ISSUE-014）。
+      在 generate 调用点显式传 use_cache=True + temperature=1.0。
+      882.91 → 114.27 s/step（7.7x），5000 步估 51 天 → 6.6 天。
+      同时修掉 Stage2 零梯度：grad_norm 0.0 → 1.177，reward_std 0.0 → 0.00504。
+      driver PID 1394540，wandb uuv2keur。
+      vLLM rollout 未采用，三个阻塞见 stage2_speed 段。
+  - at: "2026-09-05T00:49:00+08:00"
+    what: >
+      Stage2 真正跑起来：1/5000，loss 0.0，format/response=1.0，sim=0.725，
+      completion_length 336，单步 883s。wandb e7fqjxyg。
+      ISSUE-007 验收通过。driver PID 1356601。
+  - at: "2026-09-05T00:33:38+08:00"
+    what: >
+      ISSUE-013：generate/reward/optimizer.step 已过，lr_scheduler.step 因
+      torch 2.13 zip strict 与 DeepSpeed 丢掉空 LoRA param group 崩掉。
+      已 patch LRScheduler._update_lr。driver PID 1356601 重拉。
+  - at: "2026-09-05T00:10:27+08:00"
+    what: >
+      ISSUE-012：首次重启继承 CUDA_VISIBLE_DEVICES=0，8 rank 在 import
+      时 invalid device ordinal。unset 后重拉。driver PID 1337568，
+      wandb https://wandb.ai/slcheng/3dthinker-training/runs/frdiw12u 。
+      8 卡约 16.8 GiB、利用率 80%+，卡在 0/5000 的第一次 generate
+      （use_cache=False，比 ISSUE-007 的 3 分钟崩点更久）。验收仍是 step>=1。
+  - at: "2026-09-05T00:03:17+08:00"
+    what: >
+      Stage2 GRPO 已启动。driver PID 1331775，torchrun 8 rank 已起来。
+      旧失败日志归档为 stage2_fail_issue007_20260904_0155.log。
+      验收仍是 step>=1，当前只是进程活着。
+  - at: "2026-09-04T23:49:00+08:00"
+    what: >
+      ISSUE-007 已修（get_rope_index + monkey patch + original forward 对齐
+      mask/input_ids）。归档旧 stage2.log 后启动 Stage2 GRPO。验收：step>=1。
+  - at: "2026-09-04T23:45:00+08:00"
+    what: >
+      用户决定默认推理仍用修好 prompt 的 transformers（62.19%）。
+      vLLM 60.67% 保留为可选加速，不作为对外口径。
+  - at: "2026-09-04T23:06:19+08:00"
+    what: >
+      vLLM 框架落地并完成 Stage1 MindCube-Tiny 全量：60.67%（637/1050），
+      单卡 96.7s / 10.86 行/s。相对同协议 HF 62.19% 为 −1.52pp。
+      入口 eval/run_vllm_mindcube_eval.sh，环境 sr_opsd，权重 ..._latent12_vllm。
+  - at: "2026-09-04T22:18:00+08:00"
+    what: >
+      ISSUE-010 修好后 8 卡分片 HF 复测：62.19%（653/1050），
+      among 62.33 / around 72.00 / rotation 49.50。相对论文 62.7 差 −0.51。
+  - at: "2026-09-04T18:26:37+08:00"
+    what: >
+      Stage1 MindCube-Tiny 评测结束：1050/1050，basic 54.10%（568/1050）。
+      driver rc=0，GPU 已释放。此数字因 ISSUE-010 不可对外。
+  - at: "2026-09-04T15:10:00+08:00"
+    what: >
+      开始 Stage1 MindCube-Tiny 评测：HF data.zip 已解压，prompt jsonl 1050 行，
+      2 张缺图已 symlink。先 smoke 2 条再全量 GPU0。
+  - at: "2026-09-04T14:26:00+08:00"
+    what: >
+      用户询问是否跑完。进程与 8 卡均已空。Stage2 于 01:55 在 0/5000
+      generate 因 ISSUE-007 退出，无 ckpt。pipeline.log 无 stage2 exit。
+  - at: "2026-09-04T01:52:00+08:00"
+    what: >
+      Stage2 GRPO 已稳定占用 8 卡（约 16.8 GiB/卡，利用率 ~80–90%）。
+      driver PID 446756；wandb https://wandb.ai/slcheng/3dthinker-training/runs/v8sca2ph 。
+      启动过程修了 sdpa、rich/shapely/scipy/opencv-headless、processor 文件、
+      projector 路径、以及 generate_mode monkey patch。
+  - at: "2026-09-04T00:33:00+08:00"
+    what: >
+      Stage1 确认完成（1560/1560，train_loss 1.096，ce 0.182，sim 0.342）。
+      node-A 8 卡空闲。启动 Stage2 GRPO（run_stage2.sh，attn=sdpa，wandb online）。
+  - at: "2026-09-03T11:27:00+08:00"
+    what: >
+      用户要求开 wandb 并允许重训。停掉 offline 那次（PID 4055790），
+      WANDB_MODE=online 重启。run https://wandb.ai/slcheng/3dthinker-training/runs/m8lj1td1
+  - at: "2026-09-02T22:09:30+08:00"
+    what: >
+      首次 8 卡抽特征因 CUDA_VISIBLE_DEVICES + set_device(rank) 失败，已杀进程并修好后重拉流水线。
+  - at: "2026-09-02T21:55:00+08:00"
+    what: >
+      完成 Qwen2.5-VL-3B ModelScope 下载、3DThinker-10K（hf-mirror）与 VGGT 权重接线。
+      启动 VGGT→S1→S2 流水线。

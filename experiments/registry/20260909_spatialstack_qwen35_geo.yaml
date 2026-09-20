@@ -1,0 +1,227 @@
+experiment_id: 20260909_spatialstack_qwen35_geo
+title: "按 README 重训 SpatialStack 几何融合（Qwen3.5-4B + VGGT-1B）"
+status: completed
+
+created_at: "2026-09-09T09:58:00+08:00"
+finished_at: "2026-09-09T19:19:14+08:00"
+owner: cursor-window-spatialstack
+
+goal: >
+  历史同配方权重 output/spatialstack_qwen35_train 已不在磁盘上。
+  用 README SpatialStack geometry training 命令，从本地 Qwen3.5-4B 冷启动训 1 epoch。
+  不重装环境、本轮不评测。
+hypothesis: >
+  与 20260813_qwen35_geo_baseline 同一套几何融合配方应再次训完约 3308 步。
+  绝对值不可与那一轮并列，直到评测口径对齐。
+
+code:
+  git_commit: b6eeb00
+  git_dirty: true  # ACTIVE.md / LESSONS.md / README.md 等已有未提交改动，本轮未新增训练代码
+
+environment:
+  conda_env: spatialstack-qwen35
+  python: /home/c30084464/miniconda3/envs/spatialstack-qwen35/bin/python
+  PYTHONNOUSERSITE: "1"
+  packages:
+    torch: 2.10.0+cu129
+    cuda: "12.9"
+    transformers: 5.3.0
+    qwen_vl_utils: 0.0.14
+    causal_conv1d: 1.6.2.post1
+    fla: "0.4.1"
+    flash_attn: 2.8.3
+    decord: 0.6.0
+    deepspeed: 0.16.4
+  nodes: node-A
+  hostname: dsw-455344-95d655c8f-xm7dq
+  gpus_per_node: 8
+  gpu_type: H20 95GiB
+  hf_offline: true
+
+model:
+  backbone: Qwen3.5-4B
+  model_path: /home/c30084464/Documents/code/SpatialStack_OPSD/models/Qwen3.5-4B
+  geometry_encoder: VGGT-1B
+  geometry_encoder_path: /home/c30084464/Documents/code/SpatialStack_OPSD/models/VGGT-1B
+
+data:
+  training_datasets:
+    - spar_234k%60
+    - llava_hound_64k%60
+    - vlm3r_scannet%60
+    - vsi_appr_order%50
+  dataset_version: "local annotations + media already on disk; no re-download"
+  annotation_counts:
+    spar_234k: 234277
+    llava_hound_64k: 63750
+    vlm3r_scannet: 51779
+    vsi_appr_order: 3819
+
+training:
+  status: completed
+  entrypoint: scripts/train/train.sh
+  command: |
+    source miniconda3/etc/profile.d/conda.sh
+    conda activate spatialstack-qwen35
+    PYTHONNOUSERSITE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+    MODEL_PATH=$PWD/models/Qwen3.5-4B \
+    USE_GEOMETRY_ENCODER=True \
+    GEOMETRY_ENCODER_PATH=$PWD/models/VGGT-1B \
+    FEATURE_FUSION_METHOD=deepstack_language_add \
+    GEOMETRY_ENCODER_LAYERS="11 17 23" \
+    GEOMETRY_FUSION_LAYERS="0 1 2" \
+    DATA_FLATTEN=False \
+    OUTPUT_DIR=./output/spatialstack_qwen35_train \
+    bash scripts/train/train.sh
+  parameters:
+    seed: 0
+    learning_rate: 1.0e-5
+    total_batch_size: 64
+    per_device_train_batch_size: 1
+    world_size: 8
+    gradient_accumulation_steps: 8
+    epochs: 1
+    save_steps: 1000
+    max_length: 12800
+    feature_fusion_method: deepstack_language_add
+    geometry_encoder_layers: [11, 17, 23]
+    geometry_fusion_layers: [0, 1, 2]
+    use_geometry_encoder: true
+    data_flatten: false
+    use_vggt_image_preprocess: true
+    deepspeed: scripts/zero2_opt.json
+  artifacts:
+    output_dir: output/spatialstack_qwen35_train
+    checkpoint: output/spatialstack_qwen35_train
+    train_log: output/spatialstack_qwen35_train/train.rank0.log
+    driver_log: logs/train/20260909_spatialstack_qwen35_geo/driver.log
+  results:
+    metrics:
+      global_step: 3308
+      max_steps: 3310
+      epoch: 0.9996222709073053
+      train_loss: 0.5161560747903088
+      train_runtime_s: 33506.6027
+      train_samples_per_second: 6.321
+      train_steps_per_second: 0.099
+      first_logged_loss_step10: 1.9467
+      last_logged_loss_step3300: 0.3820
+    summary: >
+      1 epoch 正常结束。最终目录含 config.json 与 14.5G model.safetensors；
+      另有 checkpoint-1000/2000/3000。进程已退出，8 卡空闲。
+      退出时 rank0 打印 destroy_process_group 未调用警告，不影响已落盘权重。
+    failure_reason: ""
+
+evaluation:
+  status: running
+  entrypoint: scripts/evaluation/eval.sh
+  conda_env: spatialstack-qwen35
+  pythonpath: src
+  command: logs/eval/20260909_spatialstack_qwen35_geo/run_dual.sh lmms_all
+  benchmarks:
+    - vsibench
+  parameters:
+    model: output/spatialstack_qwen35_train
+    model_impl: qwen3_5
+    frames: 32
+    disable_thinking: true
+    hf_offline: true
+    engine: huggingface_lmms_eval
+    arms:
+      boxed:
+        VSIBENCH_PROTOCOL: spatialstack
+        max_new_tokens: 4096
+        comparable_base: 48.06
+      plain:
+        VSIBENCH_PROTOCOL: spatialstack_plain
+        max_new_tokens: 1024
+        comparable_base: 52.75
+      lmms_legacy:
+        VSIBENCH_PROTOCOL: lmms_legacy
+        max_new_tokens: 16
+        parser: first_word_split
+        comparable: "paper/upstream 16-token (e.g. 64.24 / 67.65); not 66.59/66.63"
+    note: >
+      VGGT 几何塔不能走 vLLM。boxed / plain / lmms_legacy 三口径不可并列对减，
+      也不可与 vLLM 52.81/47.31 并列。
+  artifacts:
+    eval_root: logs/eval/20260909_spatialstack_qwen35_geo
+    boxed: logs/eval/20260909_spatialstack_qwen35_geo/vsibench_boxed
+    plain: logs/eval/20260909_spatialstack_qwen35_geo/vsibench_plain
+    lmms_legacy: logs/eval/20260909_spatialstack_qwen35_geo/vsibench_lmms_legacy
+    smoke: logs/eval/20260909_spatialstack_qwen35_geo/smoke_boxed
+    smoke_lmms_legacy: logs/eval/20260909_spatialstack_qwen35_geo/smoke_lmms_legacy
+    chain_log: logs/eval/20260909_spatialstack_qwen35_geo/chain.log
+    lmms_legacy_chain_log: logs/eval/20260909_spatialstack_qwen35_geo/lmms_legacy_chain.log
+  results:
+    metrics:
+      boxed_overall: 66.59
+      boxed_answered: 100.0
+      boxed_vs_base_4806_pp: 18.53
+      plain_overall: 66.63
+      plain_answered: 100.0
+      plain_vs_base_5275_pp: 13.88
+      lmms_legacy_overall: null
+    summary: >
+      boxed/plain 已完成。lmms_legacy（论文/上游 16-token 首词解析）评测中。
+      三口径不可对减，也不可与 vLLM 并列。
+    failure_reason: ""
+    results_json:
+      boxed: logs/eval/20260909_spatialstack_qwen35_geo/vsibench_boxed/vsibench/output__spatialstack_qwen35_train/20260909_211244_results.json
+      plain: logs/eval/20260909_spatialstack_qwen35_geo/vsibench_plain/vsibench/output__spatialstack_qwen35_train/20260909_220728_results.json
+
+handoff:
+  current_phase: eval_vsi_lmms_legacy
+  last_updated: "2026-09-09T23:18:00+08:00"
+  current_task: "VSI lmms_legacy 冒烟 + 全量"
+  owner: cursor-window-spatialstack
+  active_job_id: "1961600"
+  resources: "node-A 8×H20"
+  blocker: ""
+  next_action: "冒烟 LIMIT=8 过闸后全量 5130；分数只对论文 16-token 口径"
+
+issues: []
+
+activity_log:
+  - at: "2026-09-09T09:57:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "preflight：nvidia-smi 8 卡 0MiB；df 894G 空闲；四份标注可读；媒体目录在；Qwen/VGGT config.json 在；conda spatialstack-qwen35 探针通过。"
+    result: "允许启动。不重装环境。OUTPUT_DIR 当前不存在。"
+  - at: "2026-09-09T09:59:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "setsid nohup 启动 scripts/train/train.sh，conda spatialstack-qwen35。"
+    result: >
+      grad_accum=8 实测；torchrun nproc=8 master_port=22223；
+      Qwen3_5Config 已写入 use_geometry_encoder=true、layers [11,17,23]、fusion [0,1,2]、
+      VGGT 本地路径；开始 sampling spar_234k 140566 条。
+      driver/train.sh PID 628673，torchrun 628817。
+  - at: "2026-09-09T19:19:14+08:00"
+    actor: cursor-window-spatialstack
+    action: "训练自然结束并写出最终 HF 权重。"
+    result: >
+      global_step=3308 / max_steps=3310；train_loss=0.5162；runtime 33507s。
+      output/spatialstack_qwen35_train/{config.json,model.safetensors} 存在；
+      几何字段仍在。8 卡 0 MiB。
+  - at: "2026-09-09T21:10:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "启动 VSI-Bench 双口径评测（HF/lmms-eval；spatialstack-qwen35 + PYTHONPATH=src）。"
+    result: "先 LIMIT=8 boxed 冒烟，再全量 boxed，再 plain。"
+  - at: "2026-09-09T23:01:50+08:00"
+    actor: cursor-window-spatialstack
+    action: "VSI 双口径全量结束。"
+    result: "boxed 66.59 answered 100%（22:07）；plain 66.63 answered 100%（23:01）。PLAIN_RC=0。"
+  - at: "2026-09-09T23:18:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "启动 VSI lmms_legacy（论文/上游：16 token + 首词解析）。"
+    result: "run_dual.sh lmms_all PGID 1961600；先 LIMIT=8 冒烟，再全量。SPAR3 k2 smoke 已失败，node-A 8 卡空闲后占用。"
+  - at: "2026-09-09T23:20:57+08:00"
+    actor: cursor-window-spatialstack
+    action: "lmms_legacy LIMIT=8 冒烟通过。"
+    result: "protocol=lmms_legacy, max_new_tokens=16, answered=1.0；随后启动全量。"
+
+notes:
+  conclusion: "几何 1 epoch 已训完；VSI HF boxed 66.59、plain 66.63；lmms_legacy 评测中。"
+  next_step: "lmms_legacy 全量结束后只与论文 16-token 口径比，不与 66.59/66.63 并列。"
+  relation_to_20260813: >
+    配方相同，实验 ID 不复用。历史产物已删除。本轮 OUTPUT_DIR 仍用 README 的
+    output/spatialstack_qwen35_train。

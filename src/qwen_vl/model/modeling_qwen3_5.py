@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 from pathlib import Path
@@ -12,13 +13,24 @@ from transformers.masking_utils import create_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5CausalLMOutputWithPast,
-    Qwen3_5DynamicCache,
     Qwen3_5ForConditionalGeneration,
     Qwen3_5Model,
     Qwen3_5ModelOutputWithPast,
     Qwen3_5PreTrainedModel,
     Qwen3_5TextModel,
 )
+
+try:
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DynamicCache
+except ImportError:  # transformers>=5.5 renamed this to DynamicCache
+    from transformers.cache_utils import DynamicCache as Qwen3_5DynamicCache
+
+# 5.3 asked "is this a cached forward?" from cache_position[0]; 5.5 asks the cache
+# itself via past_key_values.has_previous_state(). The predicate is the same, only
+# the argument differs, so take whichever the installed version declares.
+_LINEAR_ATTN_MASK_ARG = list(
+    inspect.signature(Qwen3_5TextModel._update_linear_attn_mask).parameters
+)[-1]
 
 from .feature_fusion import (
     FeatureFusionConfig,
@@ -308,7 +320,10 @@ class Qwen3_5TextModelWithGeometry(Qwen3_5TextModel):
             past_key_values=past_key_values,
             position_ids=text_position_ids,
         )
-        linear_attn_mask = self._update_linear_attn_mask(attention_mask, cache_position)
+        linear_attn_mask = self._update_linear_attn_mask(
+            attention_mask,
+            past_key_values if _LINEAR_ATTN_MASK_ARG == "past_key_values" else cache_position,
+        )
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -852,3 +867,14 @@ class Qwen3_5ForConditionalGenerationWithGeometry(Qwen3_5ForConditionalGeneratio
             attentions=outputs.attentions,
             rope_deltas=outputs.rope_deltas,
         )
+
+    def prepare_inputs_for_generation(self, *args, **kwargs):
+        model_inputs = super().prepare_inputs_for_generation(*args, **kwargs)
+        geometry_encoder_inputs = kwargs.get("geometry_encoder_inputs")
+        cache_position = model_inputs.get("cache_position")
+        first_step = cache_position is None or (
+            isinstance(cache_position, torch.Tensor) and cache_position.numel() > 0 and int(cache_position[0]) == 0
+        )
+        if geometry_encoder_inputs is not None and first_step:
+            model_inputs["geometry_encoder_inputs"] = geometry_encoder_inputs
+        return model_inputs

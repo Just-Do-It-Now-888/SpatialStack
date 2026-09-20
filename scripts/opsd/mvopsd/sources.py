@@ -74,6 +74,25 @@ SOURCES: dict[str, Source] = {
 }
 
 
+
+# MindCube is deliberately not in SOURCES: build_mvopsd_plan.py iterates that
+# dict and routes everything that is not spar_234k through build_video_record,
+# which reads ann["video"]. MindCube rows carry an "images" list and no video, so
+# adding it there would break the SPAR/llava/vlm3r plan build. Its pool has its
+# own builder, scripts/opsd/build_mindcube_plan.py, following the precedent of
+# build_spar3_student_k_plans.py.
+#
+# Rate 1.0 because the 9,999-row file is already the exact set the 20260906 SFT
+# round trained on (both arms, line-for-line); there is no draw to reproduce.
+MINDCUBE_SOURCE = Source(
+    name="mindcube",
+    annotation="data/mindcube/mindcube_train_answeronly.json",
+    media_root="data/mindcube/images",
+    sampling_rate=1.0,
+    sft_expected=9999,
+)
+
+
 def sample_like_sft(annotations: list, rate: float, seed: int) -> list:
     """SFT draws ``int(len * rate)`` items with an unseeded ``random.sample``.
 

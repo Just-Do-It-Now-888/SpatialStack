@@ -1,0 +1,171 @@
+experiment_id: 20260901_mvopsd_spar3_k1_200steps
+title: "SPAR 3-view K=1：同数据同协议，63 步 → 200 步（约 3.15 epoch）"
+status: cancelled  # planned | queued | running | completed | failed | cancelled
+
+created_at: "2026-09-01T23:30:00+08:00"
+started_at: null
+owner: "cursor-window-mvopsd"
+
+goal: >
+  老师 2026-09-01 反馈：SPAR3 K=1 只训 63 步（约 1 epoch）太短，鼓励跑到 200 步。
+  在评测 20260901_vsibench_boxed_lastline 基座臂结束后，用同一批 parquet、同一套
+  协议从零开跑 200 步，看 step 55 的 +2.96 pp 是继续涨、走平，还是像 SPAR 全量那样回落。
+
+hypothesis: >
+  4,064 条 / batch 64 → 63 步才扫完一遍。若增益来自对这批距离/点比较题的拟合，
+  多扫 2–3 遍应能把曲线推过 1-epoch 末点（48.46%）；若 55 步已过拟合或只是采样噪声，
+  200 步会走平或掉回 step 0 附近。
+
+design:
+  parent: 20260831_mvopsd_spar3_student_k
+  arm: k1_only
+  why_k1_only: >
+    上一轮只有 K=1 相对 step 0 有明确提升（+2.96 pp）；K=2 走平（+0.37 pp）且末步下滑。
+    老师针对「数据集上迭代太少」要求加长，因此只加长那条有效臂。K=2 不并行。
+  source_plan: data/mvopsd/plan_spar3_k1/
+  train_file: data/mvopsd/parquet_spar3_k1/main_train.parquet
+  train_rows: 4064
+  teacher_views: 3
+  k_views_student: 1
+  mean_ratio: 3.0
+  total_steps: 200
+  epochs: 3.15
+  rationale_for_200: "老师指定 200 步；200 × 64 / 4064 ≈ 3.15 epoch，不是整数 epoch"
+  test_freq: 10
+  save_freq: 10
+  test_freq_note: >
+    上一轮 63 步用 TEST_FREQ=5（14 个验证点）。本轮若仍每 5 步存 ckpt，约 41×54G≈2.2T，
+    盘余 2.9T 不够安全。改为每 10 步：21 个验证点 × ~32 min ≈ 11 h 验证，ckpt ~1.1T。
+    与上一轮重叠的可对读点为 10/20/30/40/50/60。
+  shared_protocol:
+    - "teacher_enable_thinking=False"
+    - "student enable_thinking=false"
+    - "lr 2e-6 / batch 64 / rollout.n=1 / frozen teacher"
+    - "vsibench_boxed_primary=True / trust_boxed=True"
+    - "VAL_FILE=vsibench_val_boxed_lastline.parquet"
+    - "VAL_DO_SAMPLE=1 t=1.0 top_p=0.8"
+    - "JUDGE=0"
+    - "resume_mode=disable（不从 63 步续跑，避免 LR 日程与上一轮搅在一起）"
+
+anchors:
+  step_0_note: >
+    boxed_lastline + sample 口径下，上一轮 K=1 step 0 = 46.27%。本轮 step 0 应落在同一带。
+    若落在 53 附近，说明 VAL_FILE 指错。
+  comparability: >
+    与 20260831 K=1 63 步曲线同协议、同数据，可对读 overlapping steps。
+    不可与 greedy/plain 53.6 带、离线 greedy boxed last-line（K=1 49.84 / 基座待出）并列。
+    结论只覆盖 required_views=1 的 SPAR 3-view 子集。
+
+primary_metric: "val-core/vsibench/overall/acc 走势（自比 step 0，并对读上一轮 0–63）"
+must_watch:
+  - "data/step/k_views_student/1/frac 应为 1.0"
+  - "n_views_teacher 全程为 3"
+  - "训练 response_length/mean 与 clip_ratio"
+  - "self_distillation/teacher_probe 恒定（预期 0.04456961154937744）"
+  - "self_distillation/policy_fallback_fraction 恒 0"
+  - "step 50/60 相对上一轮 step 55 峰值 49.23% 的位置"
+
+data:
+  train_file: data/mvopsd/parquet_spar3_k1/main_train.parquet
+  plan: data/mvopsd/plan_spar3_k1/
+  val_file: data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet
+
+launch:
+  node: node-A
+  gpus: 8
+  wait_for:
+    experiment_id: 20260901_vsibench_boxed_lastline
+    pid: 1887931
+    min_free_mib: 80000
+    chain: scripts/opsd/tools/chain_after.sh
+    chain_pid: 2124896
+    chain_log: logs/train/20260901_mvopsd_spar3_k1_200steps/chain.log
+    queued_at: "2026-09-01T23:33:35+08:00"
+  command: |
+    env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL \
+        -u CONDA_PYTHON_EXE PATH=/usr/bin:/usr/local/bin:/bin \
+      EXPERIMENT_NAME=20260901_mvopsd_spar3_k1_200steps \
+      TRAIN_FILE=$PWD/data/mvopsd/parquet_spar3_k1/main_train.parquet \
+      VAL_FILE=$PWD/data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet \
+      TOTAL_STEPS=200 TEST_FREQ=10 \
+      VAL_DO_SAMPLE=1 VAL_TEMPERATURE=1.0 VAL_TOP_P=0.8 VAL_N=1 \
+      JUDGE=0 \
+      bash scripts/opsd/run_mvopsd.sh main \
+        trainer.resume_mode=disable \
+        actor_rollout_ref.actor.self_distillation.teacher_enable_thinking=False
+
+wall_clock_estimate: >
+  训练 200 步 × ~33 s ≈ 1.8 h；验证 21 点（step 0 + 每 10 步至 200）× ~30–35 min
+  ≈ 11–12 h；合计约 13–14 h。checkpoint 21 × 54 GB ≈ 1.1 T；盘余 2.9 T，旧 SPAR3 K=1
+  ckpt 仍占 691 G，合计后约剩 1.1 T。
+
+artifacts:
+  train_log: logs/train/20260901_mvopsd_spar3_k1_200steps/
+  chain_log: logs/train/20260901_mvopsd_spar3_k1_200steps/chain.log
+  val_dump: logs/val/20260901_mvopsd_spar3_k1_200steps/
+  checkpoint: checkpoints/20260901_mvopsd_spar3_k1_200steps/
+  rollouts: rollouts/20260901_mvopsd_spar3_k1_200steps/
+
+handoff:
+  current_phase: stopped
+  last_updated: "2026-09-02T11:26:00+08:00"
+  current_task: "用户要求停训；SIGTERM 时正在 step 150 val"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: "FSDP 目录已按用户要求删除；勿 resume 本实验"
+
+issues:
+  - id: ISSUE-001
+    at: "2026-09-02T05:20:00+08:00"
+    symptom: >
+      TOTAL_STEPS=200，进度条 63/200，但 epoch 0 扫完即干净退出；8 卡空闲。
+    evidence: >
+      训练日志末尾 Training Progress 63/200 后 wandb sync；val dump 只到 60.jsonl；
+      latest_checkpointed_iteration=60。step 0–60 overall：47.80 / 47.38 / 47.53 /
+      47.48 / 46.89 / 47.72 / 47.59。
+    root_cause: >
+      ray_trainer 外层 for epoch in range(total_epochs)，mvopsd.yaml 默认
+      total_epochs=1。total_training_steps 只改进度条和 is_last_step，不延长循环。
+      4,064/64=63 步即 1 epoch。见 LESSON-032。
+    solution: >
+      从 checkpoints/.../global_step_60 resume_mode=auto；显式
+      trainer.total_epochs=4（4×63>200），val_before_train=False。
+    status: mitigated
+    prevention: >
+      步数超过 ceil(n_train/batch) 时必须同时提高 total_epochs。
+
+activity_log:
+  - at: "2026-09-02T11:31:00+08:00"
+    what: >
+      按用户要求删除 checkpoints/20260901_mvopsd_spar3_k1_200steps（约 744G）。
+      未动 logs/train、logs/val、rollouts。无法再从此实验 resume。
+  - at: "2026-09-02T11:26:00+08:00"
+    what: >
+      用户要求停训。对 PGID 2681194（run_mvopsd/main_ppo）发 SIGTERM；
+      进程已退出，8 卡显存 0。停在 step 150 验证中途；latest ckpt=140；
+      val dump 到 140.jsonl；未写出 global_step_150。
+  - at: "2026-09-02T05:24:32+08:00"
+    what: >
+      续跑已启动。run_mvopsd 2681194 / main_ppo 2681216；命令行含 total_epochs=4、
+      val_before_train=False、TOTAL_STEPS=200，resume_mode 走默认 auto。
+      日志 logs/train/20260901_mvopsd_spar3_k1_200steps/train_20260902_052432.log。
+  - at: "2026-09-02T05:22:00+08:00"
+    what: >
+      发现 ISSUE-001：63 步因 total_epochs=1 提前结束。准备从 step 60 续跑，
+      补 trainer.total_epochs=4。第一段 val：step0 47.80 → step60 47.59，未再现
+      上一轮 step55 的 49.23。
+  - at: "2026-09-02T00:33:36+08:00"
+    what: >
+      基座评测结束，chain_after 立即开训。Ray TaskRunner 2227263；wandb
+      https://wandb.ai/slcheng/MV-OPSD/runs/hisj4h8j
+  - at: "2026-09-01T23:33:35+08:00"
+    what: >
+      chain_after 已挂上。PID 2124896（独立 SID），等待评测 wrapper 1887931。
+      日志 logs/train/20260901_mvopsd_spar3_k1_200steps/chain.log。
+      数据复用 parquet_spar3_k1（4,064 行），协议与 20260831 K=1 相同，仅 TOTAL_STEPS
+      63→200、TEST_FREQ/SAVE_FREQ 5→10。不 resume 上一轮 ckpt。
+  - at: "2026-09-01T23:30:00+08:00"
+    what: >
+      登记并排队。等 node-A 基座 VSI boxed last-line（wrapper 1887931）结束后自动开训。

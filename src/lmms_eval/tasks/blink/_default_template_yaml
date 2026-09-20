@@ -15,7 +15,10 @@ metric_list:
 lmms_eval_specific_kwargs:
   default:
     pre_prompt: "Return exactly one uppercase option letter from the given choices ({}). Do not output any explanation, punctuation, or extra text.\n"
+    mca_post_prompt: "Answer with the option's letter from the given choices directly."
     post_prompt: ""
 
-generation_kwargs:
-  max_new_tokens: 1024
+# Prompt suffix, stop strings and parser move together via BLINK_PROTOCOL
+# (default "original" = letter-only pre_prompt + start-of-string letter;
+# set "spatialstack" for VSI-Bench boxed last-line).
+generation_kwargs: !function utils.BLINK_GENERATION_KWARGS

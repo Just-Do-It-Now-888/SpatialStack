@@ -1,0 +1,88 @@
+experiment_id: 20260902_cvbench_boxed_lastline_16tok
+title: "基座 + SPAR3 K=1 step 55：CV-Bench boxed last-line，max_new_tokens=16"
+status: completed
+completed_at: "2026-09-02T14:48:35+08:00"
+
+created_at: "2026-09-02T14:40:00+08:00"
+owner: cursor-window-mvopsd
+node: node-A
+
+goal: >
+  保持 boxed last-line 题面与解析，只把生成上限改成 16，
+  拆开「协议」和「预算」。对照：lmms_legacy 16tok 62.85 / 5.55；
+  boxed last-line 1024 88.07 / 85.05。
+
+protocol:
+  launcher: scripts/evaluation/eval.sh
+  conda_env: sr_opsd
+  CVBENCH_PROTOCOL: spatialstack
+  CVBENCH_MAX_NEW_TOKENS: "16"
+  VSIBENCH_BOXED_PRIMARY: "1"
+  decoding: greedy
+  max_new_tokens: 16
+  until: []
+  disable_thinking: true
+  model_impl: qwen3_5
+  hf_offline: true
+
+arms:
+  base:
+    model: models/Qwen3.5-4B
+    output_root: logs/eval/20260902_qwen35base_cvbench_boxed_lastline_16tok
+    results_json: logs/eval/20260902_qwen35base_cvbench_boxed_lastline_16tok/cvbench/models__Qwen3.5-4B/20260902_144055_results.json
+    status: done
+    combined: 22.27
+    accuracy_2d: 11.37
+    accuracy_3d: 33.17
+    answered: 26.35
+    Count: 0.89
+    Relation: 24.92
+    Distance: 4.00
+    Depth: 62.33
+  k1_step55:
+    hf: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+    output_root: logs/eval/20260902_spar3_k1_step55_cvbench_boxed_lastline_16tok
+    results_json: logs/eval/20260902_spar3_k1_step55_cvbench_boxed_lastline_16tok/cvbench/output__20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf/20260902_144455_results.json
+    status: done
+    combined: 0.35
+    accuracy_2d: 0.12
+    accuracy_3d: 0.58
+    answered: 0.57
+    Count: 0.00
+    Relation: 0.31
+    Distance: 0.17
+    Depth: 1.00
+
+ablation:
+  note: >
+    同一 boxed last-line 题面/解析，预算从 1024 收到 16：
+    基座 88.07 → 22.27（作答 26%）；SPAR3 85.05 → 0.35（作答 0.6%）。
+    比 lmms_legacy@16（62.85 / 5.55）更低，因为 boxed 解析不再把 Based/To
+    的首字母算作答案，截断 CoT 记未作答。
+
+comparability:
+  do_not_mix:
+    - "boxed last-line 1024（88.07 / 85.05）"
+    - "lmms_legacy 16tok（62.85 / 5.55）"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-02T14:49:00+08:00"
+  current_task: "boxed@16 基座 22.27 / SPAR3 0.35 已落盘"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: "对外能力对比仍用 boxed@1024；此臂只说明预算截断"
+
+issues: []
+activity_log:
+  - at: "2026-09-02T14:48:35+08:00"
+    what: >
+      两臂 status=0。日志确认 protocol=spatialstack max_new_tokens=16。
+      基座 combined 22.27（作答 26.35%）；SPAR3 0.35（作答 0.57%）。8 卡已释放。
+  - at: "2026-09-02T14:40:00+08:00"
+    what: >
+      启动链式评测。wrapper 3380782；CVBENCH_PROTOCOL=spatialstack
+      CVBENCH_MAX_NEW_TOKENS=16。先基座 MASTER_PORT=29537，再 step55 29538。
+      日志 logs/eval/20260902_cvbench_boxed_lastline_16tok/nohup.out。

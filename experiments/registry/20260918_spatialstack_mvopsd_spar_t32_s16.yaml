@@ -1,0 +1,260 @@
+experiment_id: 20260918_spatialstack_mvopsd_spar_t32_s16
+title: "SPAR T32/S16 MV-OPSD rerun: keep historically best 3 ckpts by greedy VSI macro"
+status: completed
+
+created_at: "2026-09-18T10:51:00+08:00"
+started_at: "2026-09-18T11:05:19+08:00"
+driver_pid: 1242487
+train_pgid: 1242487
+train_log: logs/train/20260918_spatialstack_mvopsd_spar_t32_s16/train_20260918_110519.log
+finished_at: "2026-09-19T12:20:00+08:00"
+eval_pid: 2862131
+eval_finished_at: "2026-09-19T16:11:05+08:00"
+eval_log: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/best3_benches.log
+owner: cursor-window-spatialstack
+
+goal: >
+  在 SpatialStack geo 权重上重跑 SPAR 全量（spar_3view + spar_32view）1 epoch
+  MV-OPSD。Teacher 32 / Student 16（3-view 则为 3/3）。checkpoint 保留策略改为
+  训练内 greedy sub480 `val-core/vsibench/overall/acc` 历史最高的 3 个，而不是
+  最近 3 个。
+
+hypothesis: >
+  终步或最近几步不一定是 in-loop VSI 最高点。按历史最优保留 3 个 FSDP ckpt，
+  离线 merge 才能对准曲线峰。配方与 20260915 greedy 重跑相同，只改 retention。
+
+relations:
+  init_from: 20260909_spatialstack_qwen35_geo
+  follows:
+    - 20260915_spatialstack_mvopsd_spar_t32_s16
+  engine: hf_generate
+
+code:
+  git_commit: b6eeb00
+  git_dirty: true
+
+environment:
+  conda_env: sr_opsd
+  nodes: [node-A]
+  gpus_per_node: 8
+  gpu_type: H20
+
+model:
+  backbone: Qwen3.5-4B + VGGT geometry fusion
+  model_path: output/spatialstack_qwen35_train
+  geometry_encoder: VGGT-1B
+  geometry_encoder_path: models/VGGT-1B
+  teacher: frozen
+  thinking: false
+
+design:
+  data_sources: [spar_3view, spar_32view]
+  view_budget:
+    spar_32view:
+      teacher: 32
+      student: 16
+      student_rule: required_views union farthest-point extras; empty required pins frame 0
+    spar_3view:
+      teacher: 3
+      student: 3
+      note: "N/K=1; no view privilege"
+  parquet: data/mvopsd/parquet_spar_t32_s16/main_train.parquet
+  train_rows: 54495
+  holdout_rows: 1000
+  train_by_source: {spar_3view: 33970, spar_32view: 20525}
+  total_steps: 1135
+  epochs: 1.0
+  train_batch_size: 48
+  test_freq: 50
+  save_freq: 50
+  max_actor_ckpt_to_keep: 3
+  ckpt_keep_mode: best
+  ckpt_keep_metric: val-core/vsibench/overall/acc
+  shared_protocol:
+    - "ROLLOUT_NAME=hf"
+    - "lr 2e-6 / batch 48 / rollout.n=1 / frozen teacher"
+    - "teacher_enable_thinking=False"
+    - "VAL_FILE=vsibench_val_boxed_lastline_sub480.parquet"
+    - "VAL_DO_SAMPLE=0 greedy"
+    - "JUDGE=0"
+    - "WANDB_MODE=online project=MV-OPSD"
+    - "ckpt_keep_mode=best (not FIFO recency)"
+
+wandb:
+  mode: online
+  project: MV-OPSD
+  run_name: 20260918_spatialstack_mvopsd_spar_t32_s16
+  url: "https://wandb.ai/slcheng/MV-OPSD/runs/ry2wrce6"
+  run_id: ry2wrce6
+
+read_rules:
+  - "只相对本臂 greedy step 0"
+  - "不可与 geo boxed 66.59、20260915 sample 63.70 并列"
+  - "合池分数被 3-view N/K=1 稀释"
+
+training:
+  status: completed
+  entrypoint: scripts/opsd/launch_spatialstack_spar_t32_s16.sh
+  command: |
+    setsid nohup bash scripts/opsd/launch_spatialstack_spar_t32_s16.sh
+      > logs/train/20260918_spatialstack_mvopsd_spar_t32_s16/train.nohup.log 2>&1
+  parameters:
+    seed: 20260918
+    learning_rate: 2.0e-6
+    total_batch_size: 48
+    epochs: 1.0
+    ckpt_keep_mode: best
+  artifacts:
+    output_dir: checkpoints/20260918_spatialstack_mvopsd_spar_t32_s16
+    checkpoint: "checkpoints/20260918_spatialstack_mvopsd_spar_t32_s16/global_step_{450,600,1100}"
+    hf_merged:
+      - output/20260918_spatialstack_mvopsd_spar_t32_s16_global_step_450_hf
+      - output/20260918_spatialstack_mvopsd_spar_t32_s16_global_step_600_hf
+      - output/20260918_spatialstack_mvopsd_spar_t32_s16_global_step_1100_hf
+    train_log: logs/train/20260918_spatialstack_mvopsd_spar_t32_s16/train_20260918_110519.log
+    smoke_log: logs/train/20260918_spatialstack_mvopsd_spar_t32_s16_smoke/train_20260918_105740.log
+    sft_restored_from: "node-C output/spatialstack_qwen35_train (14G final weights)"
+  results:
+    metrics:
+      smoke_global_step: 2
+      smoke_val_smoke8_acc: 0.6417
+      smoke_policy_fallback_fraction: 0.0
+      smoke_teacher_image_swap_fraction: 1.0
+      smoke_vopd_loss: 8.09e-5
+      smoke_teacher_probe: 0.08568
+      total_steps: 1135
+      inloop_vsi_step450: 0.6820
+      inloop_vsi_step1100: 0.6759
+      inloop_vsi_step600: 0.6729
+      inloop_vsi_step1135: 0.6484
+    summary: >
+      SMOKE 两步通过（greedy smoke8 64.17%，fallback=0，T32/S16 mix）。
+      正式 1135/1135 完成（约 25.2h）。best-3 保留 450/1100/600；终步 1135 未进 Top-3。
+    failure_reason: ""
+
+evaluation:
+  status: completed
+  finished_at: "2026-09-19T16:11:05+08:00"
+  entrypoint: scripts/opsd/eval_spar_t32_s16_best3_benches.sh
+  command: |
+    setsid nohup bash scripts/opsd/eval_spar_t32_s16_best3_benches.sh
+      >> logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/best3_benches.nohup.log 2>&1
+  benchmarks: [cvbench, blink_spatial, sparbench]
+  parameters:
+    in_loop: vsibench_val_boxed_lastline_sub480.parquet greedy
+    protocol: lastline
+    conda_env: sr_opsd
+    hf_hub_offline: true
+    steps: [450, 600, 1100]
+    compare_to: 20260918_spatialstack_geo_lastline
+    note: "不 chain 全量 VSI；不可与 geo boxed 66.59/86.06/68.86 并列"
+  artifacts:
+    eval_root: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16
+    eval_log: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/best3_benches.log
+    eval_nohup: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/best3_benches.nohup.log
+    cv_json_450: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/step450_cvbench_lastline/cvbench/output__20260918_spatialstack_mvopsd_spar_t32_s16_global_step_450_hf/20260919_125939_results.json
+    blink_json_450: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/step450_blink_spatial_lastline/blink_spatial/output__20260918_spatialstack_mvopsd_spar_t32_s16_global_step_450_hf/20260919_160819_results.json
+    spar_json_450: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/step450_sparbench_lastline/sparbench/output__20260918_spatialstack_mvopsd_spar_t32_s16_global_step_450_hf/20260919_130419_results.json
+    cv_json_600: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/step600_cvbench_lastline/cvbench/output__20260918_spatialstack_mvopsd_spar_t32_s16_global_step_600_hf/20260919_132555_results.json
+    blink_json_600: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/step600_blink_spatial_lastline/blink_spatial/output__20260918_spatialstack_mvopsd_spar_t32_s16_global_step_600_hf/20260919_160921_results.json
+    spar_json_600: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/step600_sparbench_lastline/sparbench/output__20260918_spatialstack_mvopsd_spar_t32_s16_global_step_600_hf/20260919_132858_results.json
+    cv_json_1100: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/step1100_cvbench_lastline/cvbench/output__20260918_spatialstack_mvopsd_spar_t32_s16_global_step_1100_hf/20260919_134921_results.json
+    blink_json_1100: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/step1100_blink_spatial_lastline/blink_spatial/output__20260918_spatialstack_mvopsd_spar_t32_s16_global_step_1100_hf/20260919_161021_results.json
+    spar_json_1100: logs/eval/20260918_spatialstack_mvopsd_spar_t32_s16/step1100_sparbench_lastline/sparbench/output__20260918_spatialstack_mvopsd_spar_t32_s16_global_step_1100_hf/20260919_135223_results.json
+  results:
+    metrics:
+      geo_sft_cvbench_lastline: 85.99
+      geo_sft_blink_spatial_macro: 52.29
+      geo_sft_sparbench_lastline: 68.92
+      cvbench_lastline_450: 84.48
+      blink_spatial_macro_450: 52.81
+      blink_mvr_450: 3.01
+      blink_relative_depth_450: 85.48
+      blink_spatial_relation_450: 69.93
+      sparbench_lastline_450: 68.37
+      cvbench_lastline_600: 83.96
+      blink_spatial_macro_600: 50.98
+      blink_mvr_600: 5.26
+      blink_relative_depth_600: 79.84
+      blink_spatial_relation_600: 67.83
+      sparbench_lastline_600: 67.93
+      cvbench_lastline_1100: 84.15
+      blink_spatial_macro_1100: 53.16
+      blink_mvr_1100: 6.02
+      blink_relative_depth_1100: 81.45
+      blink_spatial_relation_1100: 72.03
+      sparbench_lastline_1100: 67.10
+    summary: >
+      lastline vs SpatialStack geo SFT：CV/SPAR 三 ckpt 均低于 SFT（85.99/68.92）；
+      BLINK-Spatial 450/1100 略高于 SFT 52.29，600 低于。ISSUE-001 补跑后 fail=0。
+    failure_reason: ""
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-19T16:11:05+08:00"
+  current_task: none
+  owner: cursor-window-spatialstack
+  active_job_id: ""
+  resources: "node-A 8×H20 idle"
+  blocker: ""
+  next_action: "none; do not chain full VSI unless requested"
+
+issues:
+  - id: ISSUE-001
+    at: "2026-09-19T14:12:30+08:00"
+    symptom: "blink_spatial lastline missing results rc=0 on steps 450/600/1100"
+    evidence: "FileNotFoundError: Directory cache/datasets/BLINK-Benchmark__BLINK/Spatial_Relation not found; DONE fail=1"
+    root_cause: >
+      BLINK yaml 用 load_from_disk 相对项目 cache/，不走 HF hub。清盘后只 rsync 了
+      ~/.cache/huggingface，CV/SPAR 能 offline 命中，BLINK 不能。
+    solution: "rsync Spatial_Relation / Relative_Depth / Multi-view_Reasoning from node-C; rerun driver (CV/SPAR skip)"
+    status: resolved
+    prevention: "评测启动前检查 cache/datasets/BLINK-Benchmark__BLINK 三子集，不能只查 HF hub。见 LESSON-043。"
+
+activity_log:
+  - at: "2026-09-18T10:51:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "created registry; best-ckpt retention + SPAR T32/S16 rerun"
+    result: "status=planned"
+  - at: "2026-09-18T10:52:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "rsync geo SFT final weights from node-C"
+    result: "output/spatialstack_qwen35_train 14G config.json+model.safetensors"
+  - at: "2026-09-18T10:57:40+08:00"
+    actor: cursor-window-spatialstack
+    action: "SMOKE=1 two steps sr_opsd node-A"
+    result: "gates passed; smoke8 acc 0.6417; fallback 0; wandb teardown BrokenPipe ignored"
+  - at: "2026-09-18T11:05:19+08:00"
+    actor: cursor-window-spatialstack
+    action: "formal 1135-step WANDB online ckpt_keep_mode=best"
+    result: "PID 1242487 PGID 1242487 python 1242537"
+  - at: "2026-09-19T12:20:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "training finished 1135/1135"
+    result: "best-3 450/1100/600; wandb ry2wrce6"
+  - at: "2026-09-19T12:58:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "merge FSDP 450/600/1100 to HF"
+    result: "three 14G dirs with config.json + model.safetensors"
+  - at: "2026-09-19T12:59:23+08:00"
+    actor: cursor-window-spatialstack
+    action: "start lastline CV/BLINK-spatial/SPAR on best-3"
+    result: "eval PID 2838674; skip merge; first task cvbench step 450"
+  - at: "2026-09-19T14:12:30+08:00"
+    actor: cursor-window-spatialstack
+    action: "best3 lastline first pass finished"
+    result: "CV/SPAR ok; BLINK missing (ISSUE-001); fail=1"
+  - at: "2026-09-19T16:08:03+08:00"
+    actor: cursor-window-spatialstack
+    action: "rsync BLINK disk cache; retry driver"
+    result: "eval PID 2862131; skip CV/SPAR; blink_spatial step 450"
+  - at: "2026-09-19T16:11:05+08:00"
+    actor: cursor-window-spatialstack
+    action: "BLINK retry finished fail=0"
+    result: "macros 52.81/50.98/53.16 for 450/600/1100; node-A idle"
+
+notes:
+  conclusion: >
+    vs geo SFT lastline (CV 85.99 / BLINK 52.29 / SPAR 68.92): SPAR T32/S16
+    does not beat SFT on CV or SPAR; BLINK mixed (1100 53.16, 450 52.81, 600 50.98).
+  next_step: "none; full VSI lastline not run"

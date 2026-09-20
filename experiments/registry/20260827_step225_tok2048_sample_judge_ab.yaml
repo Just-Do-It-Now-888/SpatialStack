@@ -1,0 +1,39 @@
+experiment_id: 20260827_step225_tok2048_sample_judge_ab
+title: "step225 sample@2048：规则无法解析送 Judge vs 判错对比"
+status: completed
+owner: cursor-agent
+node: node-A
+checkpoint: checkpoints/20260826_mvopsd_vlm3r_epoch1_boxed_sample/global_step_225
+protocol:
+  decoding: sample
+  temperature: 1.0
+  top_p: 0.8
+  max_tokens: 2048
+  prompt_suffix: ' The final answer MUST BE put in \boxed{}.'
+  trust_boxed: true
+  trust_terse: true
+  trust_mca_tail: true
+  judge_mode: extract
+comparison:
+  A: "rule_answered -> rule score; else judge score"
+  B: "rule_answered -> rule score; else 0"
+out_dir: logs/vsi_train_eval/20260826_mvopsd_vlm3r_epoch1_boxed_sample/global_step_225_tok2048_sample_trust_v3
+log: logs/eval/20260827_step225_tok2048_sample_trust_v3.log
+metrics:
+  official_judge_extract_overall: 44.75
+  official_answered_pct: 97.35
+  clip_ratio_pct: 2.51
+  trust:
+    boxed: 3850
+    terse: 1138
+    mca_tail: 6
+    pending_judge: 136
+  rule_unparsed: 28
+  rule_unparsed_frac_pct: 0.55
+  A_judge_fallback_overall: 45.46
+  B_rule_strict_overall: 45.46
+  delta_A_minus_B_pp: 0.0
+  judge_recovered_unparsed: 0
+conclusion: >
+  trust_v3 下仅 0.55% 规则无法解析；Judge 对这 28 条全部返回 NONE，
+  A/B 无差异。136 条送 Judge 的行里规则已能读，Judge 反而拉低分数。

@@ -1,0 +1,84 @@
+experiment_id: 20260914_teacher_key_plus_probe
+title: "Teacher 关键帧 + 1..10 额外帧准确率曲线"
+status: completed
+
+created_at: "2026-09-14T19:20:00+08:00"
+finished_at: "2026-09-14T19:32:03+08:00"
+owner: cursor-window-mvopsd
+
+goal: >
+  在保留 oracle required_views 的前提下，嵌套补 1–10 张相册帧，测量冻结
+  Qwen3.5-4B Teacher 准确率随额外帧数的变化。
+
+hypothesis: >
+  上一轮 key vs full 显示 32→3.1 帧几乎不掉点（Δ −0.62pp）。若信息瓶颈不在
+  关键帧附近的上下文，则 key+1..+10 曲线应接近平坦；若 distance_prediction_oo_video
+  的 −7.3pp 来自缺上下文，则该题型应随 extra 上升。
+  结果：整体曲线平坦（21.22 → 21.21）；distance_prediction_oo_video 从 28.48 升到 34.84。
+
+relations:
+  follows: 20260914_teacher_keyframe_probe
+  note: 同一 seed 20260914、同一 spar32 1000 题。
+
+design:
+  source: spar_32view
+  questions: 1000
+  extras: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  extra_selection: farthest_point_in_album_index
+  builder: scripts/opsd/build_teacher_key_plus_sweep.py
+  driver: scripts/opsd/run_teacher_key_plus_probe.sh
+  protocol:
+    model: models/Qwen3.5-4B
+    env: sr_opsd
+    generation: teacher_eval_core greedy @1024
+    scoring: score_teacher_dump.py rule tier
+  gpu: "8×H20 TP=8 gpu_memory_utilization=0.85"
+  wall_seconds: 461
+
+artifacts:
+  parquet: data/mvopsd/parquet_key_plus_sweep/sweep_spar32_key_plus.parquet
+  logs: logs/eval/teacher_key_plus_probe/spar32/
+  curve: logs/eval/teacher_key_plus_probe/spar32/curve_summary.json
+
+evaluation:
+  status: done
+  scoring_note: 规则层；judge_queue 2137 行未跑。
+  overall_curve:
+    0: 21.22
+    1: 21.44
+    2: 20.83
+    3: 20.02
+    4: 20.02
+    5: 20.37
+    6: 20.85
+    7: 19.85
+    8: 19.90
+    9: 20.15
+    10: 21.21
+  delta_plus10_vs_key: -0.01
+  by_type_key0_to_plus10:
+    distance_infer_center_oo_video: {0: 38.80, 10: 37.60}
+    distance_prediction_oo_video: {0: 28.48, 10: 34.84}
+    spatial_imagination_oc_video: {0: 16.40, 10: 11.20}
+    spatial_imagination_oo_video: {0: 1.20, 10: 1.20}
+  conclusion: >
+    在关键帧之外再加 1–10 帧，整体准确率在 19.9–21.4% 之间抖动，key+10 相对
+    key+0 为 −0.01pp，不能提高 Teacher 总体精度。distance_prediction_oo_video
+    是例外：+6.4pp（28.48→34.84），部分收回上一轮相对 full 的 −7.3pp。
+    空间想象题补帧无益甚至略降。
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-14T19:32:03+08:00"
+  next_action: 若改 teacher 输入，默认只用 required_views；仅对 distance_prediction_oo_video 考虑少量补帧。
+
+issues: []
+
+activity_log:
+  - at: "2026-09-14T19:20:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "建成 11000 行 parquet；单测 4/4；smoke 22 行通过"
+  - at: "2026-09-14T19:32:03+08:00"
+    actor: cursor-window-mvopsd
+    action: "全量 11000 行生成+规则判分"
+    result: "key+0 21.22 → key+10 21.21；墙钟 461s TP=8"

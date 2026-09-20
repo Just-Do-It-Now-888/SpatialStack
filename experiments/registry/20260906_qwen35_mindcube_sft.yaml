@@ -1,0 +1,390 @@
+experiment_id: 20260906_qwen35_mindcube_sft
+title: "Qwen3.5-4B 在 MindCube 上的 SFT：answer-only vs 文本 CoT（两条 arm，唯一变量是监督目标）"
+status: completed
+created_at: "2026-09-06T23:10:00+08:00"
+owner: cursor-window-mindcube
+
+goal: >
+  在 MindCube train 上对 Qwen3.5-4B 做 SFT，用两条 arm 把「答案前有无推理正文」这一项
+  单独测出来：arm A 目标是 <answer>C. Curtain</answer>（中位 9 token），arm B 目标是
+  3DThinker 的文本 CoT 正文 + 同一个 answer 行（中位约 381 token）。题面、图片、超参、
+  步数、评测协议逐项相同，只换标注文件。步数口径沿用 3DThinker Stage1（batch 64、
+  157 步/epoch），但先只跑 2 epoch = 314 步、lr 1e-5。
+
+data:
+  builder: scripts/mindcube/build_mindcube_sft.py
+  sources:
+    train_split: 3DThinker/MindCube-main/data/raw/MindCube_train.jsonl  # 权威 gt_answer + 原图相对路径
+    prompt_template: 3DThinker/MindCube-main/data/prompts/general/MindCube_tinybench_raw_qa.jsonl
+    answeronly_target: 3DThinker/data/idx.jsonl                        # mindcube_output
+    cot_target: 3DThinker/data/data_output3d_begin_10k_resized.jsonl   # text_output
+  annotations:
+    - data/mindcube/mindcube_train_answeronly.json   # 9999 条
+    - data/mindcube/mindcube_train_cot.json          # 9999 条，逐行同题同序
+  images: data/mindcube/images -> 3DThinker/MindCube-main/data   # 软链，用原图不用 resize 版
+  image_counts: {2: 1668, 3: 916, 4: 7415}
+
+  join_key_finding: >
+    idx.jsonl 与 CoT 文件都没有 id，只有一个 idx。实测 idx 是 1..10000 的全置换，但它
+    索引的是 3DThinker 管线内部的某个序：按行号（0-based 与 1-based 都试过）对
+    MindCube_train 只能对上 1447~1823/10000，对全量 MindCube.jsonl 只能对上 13/10000。
+    改用复合键 (question, 图片相对路径元组)，该键在 train 里 10000/10000 唯一，两个文件
+    都 100% 命中。**不能按 question 单独 join**——train 的 question 只有 8104/10000 唯一
+    （同 LESSON-028）。
+
+  verification:
+    prompt_template_constant: "1050/1050 tinybench 行共享同一个常量模板"
+    prompt_verbatim: "idx.mindcube_input == '<image>\\n'*N + 该模板 + question，10000/10000"
+    gt_self_consistency: "idx.answer 的字母 == train.gt_answer，10000/10000"
+    answeronly_target: "mindcube_output == '<answer>' + answer + '</answer>'，10000/10000"
+    cot_structure: "text_output 匹配 '<output_3D>\\n<think>…</think>\\n<answer>…</answer>'，10000/10000"
+    images_exist: "全部原图存在，0 缺失"
+    dropped:
+      - idx: 4050
+        id: among_group725_gen_4_2
+        reason: >
+          CoT 内 <answer> 写成 'A. TV (as per provided answer, but my spatial reasoning
+          indicates it should be D. Brown curtains and windows)'，与 gt 'A. TV' 不一致。
+          两条 arm 同时丢弃以保持逐行对齐，故各 9999 条。
+
+  target_shaping:
+    cot_strip: >
+      剥掉 <output_3D> 前缀与 <think>/</think> 标签。训练模板
+      QWEN3_5_NON_THINKING_CHAT_TEMPLATE 已给每个 assistant 轮预置
+      '<think>\\n\\n</think>\\n\\n'，保留原标签会渲染成嵌套 think 块（同类 LESSON-029）。
+    whitespace_normalised: >
+      归档 CoT 正文的首字符按行不同（4836 条空格 / 1394 条换行 / 其余字母），尾部换行
+      0~2 个。已 strip 后用单个 \\n 接 <answer> 行，避免模型去学这些噪声。
+
+code_changes:
+  - file: src/qwen_vl/data/utils.py
+    change: >
+      prepare_image_inputs 新增 use_vggt_preprocess（默认 True，历史路径一字不改）。
+      关掉时把 PIL 图直接交给 Qwen processor（此路不能传 do_rescale=False）。
+  - file: src/qwen_vl/train/argument.py
+    change: "DataArguments 新增 use_vggt_image_preprocess，默认 True"
+  - file: src/qwen_vl/data/data_qwen.py
+    change: "第 499 行透传该开关"
+  - file: src/qwen_vl/data/__init__.py
+    change: "注册 mindcube_answeronly / mindcube_cot"
+  - file: scripts/train/train.sh
+    change: >
+      新增 EPOCHS / SAVE_STEPS / MAX_PIXELS / MIN_PIXELS / USE_VGGT_IMAGE_PREPROCESS
+      五个环境变量覆盖。默认值逐项等于改动前的硬编码值（1 / 1000 / 451584 / 12544 / true），
+      已实测确认，历史 run 复现不受影响。
+
+image_preprocess_decision:
+  decision: "本轮训练侧关掉 VGGT 预处理，训练与评测都走原版 Qwen3.5 processor（用户 2026-09-06 决策）"
+  evidence: >
+    prepare_image_inputs 原先无条件先过 VGGT 的 load_and_preprocess_images，其默认
+    mode="crop" 语义是「宽固定 518px，高度超出则居中裁切」。实测一张 480×640 竖图：
+    518×686 → 居中裁高到 518×518 → 512×512 → grid [1,32,32] = 256 token/图，
+    上下各丢 12.2%（共 24.5%）。抽 400 张 MindCube 图，93.5% 会被裁，平均丢 24.5% 高度
+    （92% 的图是 480×640 竖图）。
+  why_not_historical_parity: >
+    SPAR 等既有数据全是横图（1920×1440 / 1296×968），按宽缩到 518 后高只有约 392 < 518，
+    永远不触发居中裁切（仓库自测的「384×512、192 token/视角」正是无裁切结果）。所以在
+    MindCube 上原样跑不是复刻历史，而是引入一个 SFT 基线里不存在的视野损失。
+  why_safe: >
+    本轮 USE_GEOMETRY_ENCODER=false，geometry_encoder_inputs 仅在 data_qwen.py:595
+    为真时进 batch；且 qwen3.5 分支的 geometry_encoder_inputs 是从原图独立算的，
+    不经过 VGGT。该步对 Qwen 路径唯一作用就是当一个 resize。
+  coupled_fix: >
+    data_qwen.py:251-254 把 data_args.max_pixels/min_pixels 直接写进
+    image_processor.size。VGGT 在前时被硬缩放盖掉、形同失效，绕过后立刻生效。
+    train.sh 原硬编码 451584/12544 与评测侧 1605632/200704 不同（480×640 恰好两边同
+    结果，但 2016×1512 那类大图会缩到不同尺寸），故本轮显式设成与评测侧逐字相同。
+  verified: >
+    480×640 竖图：use_vggt_preprocess=True → grid [1,32,32] = 256 token；
+    False → grid [1,40,30] = 300 token，与 qwen3_5.py 同参评测侧逐项相同。
+  cost: >
+    本轮分数的图像口径不能与 20260813_qwen35_geo_baseline 等历史 run 并列。
+    曲线内部仍完全可比（锚点与两条 arm 的所有 checkpoint 同设置）。
+
+training:
+  entry: scripts/train/train.sh
+  model: models/Qwen3.5-4B
+  steps: 314            # 实测 HF Trainer 口径：2 epoch × ceil(9999/64) = 2 × 157
+                        # 先前登记的 312 是按 floor 估的，已订正
+  epochs: 2
+  lr: 1e-5
+  lr_scheduler: cosine
+  warmup_ratio: 0.03
+  total_batch_size: 64  # 8 卡 × per_device 1 × grad_accum 8，与 3DThinker Stage1 逐项相同
+  save_steps: 39        # 每 1/4 epoch 一个，共 8 个 checkpoint
+  use_geometry_encoder: false
+  use_vggt_image_preprocess: false
+  max_pixels: 1605632
+  min_pixels: 200704
+  tunable: "tune_mm_llm=True / tune_mm_vision=False / tune_mm_mlp=False（只训语言塔）"
+  deepspeed: scripts/zero2_opt.json
+  seed: 0
+  note: >
+    两条 arm 的标注同序同长，只有 gpt 目标不同，故同 seed 下 data_qwen.py:245 的
+    random.shuffle 会洗出同一个排列，两条 arm 每步看到同一批样本。
+
+evaluation:
+  script: scripts/mindcube/eval_mindcube_qwen35.py
+  driver: scripts/mindcube/run_mindcube_eval.sh
+  rows: 3DThinker/MindCube-main/data/prompts/general/MindCube_tinybench_raw_qa.jsonl  # 1050 条
+  protocol:
+    prompt: "官方 input_prompt 原样，不重建"
+    decoding: greedy
+    max_new_tokens: 2048
+    disable_thinking: true
+    max_pixels: 1605632
+    min_pixels: 200704
+    sharding: "rows[i::8]，每卡一进程，与单进程等价"
+  scoring: >
+    直接 import lmms_eval.tasks.mindcube.utils 的 mindcube_process_results 与四个
+    aggregate 函数，判分与 among/around/rotation 分型只留一份定义（LESSON-023 第 3 条）。
+  why_not_lmms_eval_task: >
+    lmms-eval 的 mindcube_tiny 指向 HF 上的 oscarqjh/MindCube_lmmseval，本机没有缓存，
+    联网握手有挂死风险（LESSON-003）。
+  env: >
+    conda spatialstack-qwen35（transformers 5.3.0）。脚本内强制 PYTHONNOUSERSITE=1——
+    ~/.local 的 opentelemetry 缺 zipp，不设这一位时 import transformers 直接失败
+    （LESSON-026）。另设三个 OFFLINE 位。
+  reported_alongside_accuracy:
+    - "extract_answer 读不出答案的比例（未作答与答错在总分里同形，LESSON-011/020）"
+    - "输出长度中位/均值/最大与撞满 max_new_tokens 的比例"
+    - "每图视觉 token 数（用于核对训练侧与评测侧一致）"
+  checkpoint_selection:
+    decision: sparse
+    points: [78, 156, 234, 312]      # 加最终 314，共 5 点/arm
+    why: >
+      checkpoint 只落在 39 的整数倍上，所以取 78/156/234/312 而非等分的 157/235。
+      单次 1050 条评测在 8 卡上约 30 分钟；稀疏 4+1 点两条 arm 双节点并行约 1.5 小时，
+      足以判读趋势与是否过拟合。若某段出现拐点再回补中间点（checkpoint 都保留着）。
+    retention_ok: >
+      save_total_limit=10，实际产出 9 个（39..312 + final），早期 checkpoint 不会被
+      自动删除，事后回补中间点是可行的。
+
+arms:
+  answeronly:
+    node: node-A
+    dataset: mindcube_answeronly
+    status: done
+    started_at: "2026-09-06T23:52:00+08:00"
+    wall_clock: "49m31s for 314 steps (~8.5 s/it)"
+    output_dir: ./output/20260906_qwen35_mindcube_sft_answeronly
+    log: logs/train/20260906_qwen35_mindcube_sft_answeronly/launch.log
+    loss: "0.224 (step10) -> 0.076 (step30) -> 0.019 (end)"
+    curve:                # tinybench 1050 条，greedy，与锚点同环境同图像口径
+      - {step: 0,   overall: 46.86, among: 42.50, around: 58.80, rotation: 45.00, out_tok_median: 288}
+      - {step: 78,  overall: 52.00, among: 53.00, around: 65.60, rotation: 32.00, out_tok_median: 10}
+      - {step: 156, overall: 58.10, among: 59.17, around: 69.60, rotation: 40.50, out_tok_median: 11}
+      - {step: 234, overall: 72.67, among: 78.67, around: 67.60, rotation: 61.00, out_tok_median: 11}
+      - {step: 314, overall: 74.48, among: 80.00, around: 67.20, rotation: 67.00, out_tok_median: 11}
+    unreadable_pct_all_points: 0.00
+    read: >
+      overall +27.6 pp（46.86 -> 74.48），到 314 步仍在上升、未饱和。
+      输出长度从 288 token 塌到 11 token——answer-only 监督确实让模型放弃了推理过程，
+      但分数反而涨，说明 tinybench 上「直接作答」并不吃亏。
+      两处非单调要留意：rotation 在 step 78 先从 45.00 掉到 32.00 再回升到 67.00；
+      around 在 step 156 达到 69.60 后回落到 67.20（n=250，方差大，不足以定论）。
+      涨幅主要来自 among（42.50 -> 80.00，n=600）。
+  cot:
+    node: node-B
+    dataset: mindcube_cot
+    status: done
+    started_at: "2026-09-06T23:41:00+08:00"
+    wall_clock: "1h14m50s for 314 steps"
+    output_dir: ./output/20260906_qwen35_mindcube_sft_cot
+    log: logs/train/20260906_qwen35_mindcube_sft_cot/launch.log
+    loss: "1.363 (step10) -> 1.149 (step20) -> 0.926 (end)"
+    observed: >
+      显存峰值 85.7 GiB/卡，全程未 OOM。loss 从 1.36 降到 0.93，降幅远小于 arm A，
+      与 381 token 目标相称（两条 loss 不可并列比较）。
+      评测比 arm A 慢得多：CoT 输出长，单点约 30 分钟，四点约 2 小时。
+    eval_env: "node-B / sr_opsd（与锚点的 spatialstack-qwen35 三项版本一致，见 ISSUE-001）"
+    curve:
+      - {step: 0,   overall: 46.86, among: 42.50, around: 58.80, rotation: 45.00, out_tok_median: 288}
+      - {step: 78,  overall: 64.86, among: 62.67, around: 73.60, rotation: 60.50, out_tok_median: 322}
+      - {step: 156, overall: 68.86, among: 65.83, around: 76.80, rotation: 68.00, out_tok_median: 313}
+      - {step: 234, overall: 68.38, among: 67.33, around: 75.20, rotation: 63.00, out_tok_median: 328}
+      - {step: 314, overall: 69.81, among: 70.00, around: 74.80, rotation: 63.00, out_tok_median: 319}
+    unreadable_pct_all_points: 0.00
+    read: >
+      overall +22.95 pp（46.86 -> 69.81）。与 arm A 的形状截然不同：78 步就到 64.86
+      （同期 arm A 只有 52.00），随后基本走平（68.86 / 68.38 / 69.81），
+      156 步后的三点彼此差异在噪声量级。输出长度全程保持 313-328 token，
+      没有出现 arm A 那种塌缩。
+
+baseline:
+  model: models/Qwen3.5-4B
+  status: done
+  output_root: logs/eval/20260906_qwen35_mindcube_sft/baseline
+  note: "两条 arm 共用这一个 step 0 锚点"
+  result:
+    overall: 46.86
+    among: 42.50        # n=600
+    around: 58.80       # n=250
+    rotation: 45.00     # n=200
+    unreadable_pct: 0.00
+    output_tokens: "median 288 / mean 352.5 / max 2048"
+    hit_max_new_tokens_pct: 2.00
+    visual_tokens_per_image_median: 300   # 与训练侧 bypass 路径一致，硬门禁通过
+  read: >
+    unreadable 0% 说明判分链没有病态，这个 46.86 是真实作答水平而非解析失败。
+    与 3DThinker 报告的 62.19% 差 15.3 pp，但 rotation 分项已经接近（45.00 vs 49.50），
+    差距主要在 among（42.50 vs 62.33）。不是受控对照，只作量级参考。
+
+conclusion:
+  figure: experiments/reports/figs/mindcube_qwen35_sft_curve.png
+  headline: >
+    两条 arm 都大幅超过基座锚点，且都超过 3DThinker 报告的 62.19%。最终点
+    arm A 74.48 > arm B 69.81，差 +4.67 pp，McNemar 配对检验 p=5.5e-3（显著）。
+  paired_test:
+    method: "McNemar with continuity correction, n=1050, 逐题配对"
+    final_A_vs_B: {only_A_correct: 174, only_B_correct: 125, agree: 751, delta_pp: 4.67, p: 5.5e-3}
+    per_category_step314:
+      among:    {n: 600, A: 80.00, B: 70.00, delta_pp: 10.00, p: 1.7e-6, verdict: "A 显著更好"}
+      around:   {n: 250, A: 67.20, B: 74.80, delta_pp: -7.60, p: 2.6e-2, verdict: "B 更好，但 n 小"}
+      rotation: {n: 200, A: 67.00, B: 63.00, delta_pp: 4.00,  p: 4.4e-1, verdict: "不显著"}
+    all_points_vs_anchor: "8 个点全部 p < 0.011，最弱的是 arm A step 78（p=1.0e-2）"
+  shape_difference: >
+    arm B 学得快但早早走平（78 步 64.86，之后三点 68.86/68.38/69.81 在噪声内）；
+    arm A 起步慢但持续爬升，在 156-234 步之间反超，到 314 步仍未饱和。
+    这提示：更长的预算下 arm A 可能继续涨，而 arm B 大概率不会。
+  complementarity:
+    both_correct: 608
+    only_A: 174
+    only_B: 125
+    neither: 143
+    oracle_union_pct: 86.38
+    note: >
+      两条 arm 的错误只有部分重叠，理想选路上限 86.38%，比最好的单条（74.48%）
+      高 11.9 pp。分项方向也互补：A 强在 among，B 强在 around。
+  caveats:
+    - "in-domain 单 seed。污染已排查（图片/场景零重叠），但仍不等于空间能力提升。"
+    - "与 3DThinker 62.19% 的比较不是受控对照：基座、监督信号、步数、lr 都不同。"
+    - "around/rotation 分项 n 只有 250/200，分项结论比 overall 弱得多。"
+    - "arm A 输出塌到 11 token，在只看选项正确率的 benchmark 上无损，但它已不产出可读推理。"
+
+reading_discipline:
+  - >
+    与 3DThinker 的 62.19% 差三项：基座（Qwen3.5-4B vs Qwen2.5-VL-3B）、监督（无 3D
+    latent 分支、无 VGGT 对齐损失）、步数与 lr。arm B 是「3DThinker Stage1 的无 3D
+    分支文本消融」这个方向，但不是受控复现，只能作量级参考。
+  - "tinybench 单 seed、1050 条、greedy，1 pp 级别差异不足以判读；分项条数更少、方差更大。"
+  - >
+    arm A 与 arm B 每步监督 token 量差约 40 倍（9 vs 381），两条 loss 曲线不可并列
+    （不同 token 数上的平均），只有下游 tinybench 分数可比。
+  - >
+    官方 extract_answer 的最高优先级模式是 ([A-E])\\.，取最后一个匹配。若模型在推理里
+    复述了选项列表再作答，末个选项字母可能盖过真答案。这是官方实现的既有行为，为口径
+    一致原样复用，但读数时要看 unreadable 比例与样本。
+  - "这一轮只测 in-domain。MindCube 涨分不等于空间能力提升。"
+  - >
+    污染检查（已做，结论干净）：MindCube_train(10000) vs tinybench(1050) 的
+    id 重叠 0/1050、(question,images) 重叠 0/1050、图片文件重叠 0/428、
+    场景前缀重叠 0/124。仅问句文本重叠 82/800，属模板化问法复用在不相交场景上，
+    不构成泄漏。故 74.48 不是测试集污染的产物；但仍是同分布 in-domain 泛化。
+
+risks:
+  - >
+    开关未生效会静默劣化而不报错：use_vggt_image_preprocess 若因参数没串通回落到默认
+    true，训练照跑，只是又回到裁掉 24.5% 视野的状态。故冒烟阶段的 token 数比对是硬门禁。
+  - "过拟合：9999 条训 2 epoch。arm A 可能塌成只输出选项字母，arm B 可能背下 CoT 模板。"
+  - >
+    CoT 事实性未审：只校验了「CoT 结尾答案与 gt 一致」（9999/10000），没有校验推理过程
+    是否正确。arm B 若涨分，不能声称模型学到了正确推理。
+  - >
+    arm B 显存余量薄：实测 54-85 GiB/卡，最高一张 84.8 GiB。CoT 目标长且长度方差大，
+    遇到长尾样本可能 OOM。若中途挂掉，从最近 checkpoint 续跑而不是重开，并记 issue。
+  - >
+    磁盘：单 checkpoint 实测 66 GB，其中 57 GB 是 DeepSpeed 优化器状态 global_stepN/，
+    评测只需要 9.7 GB 的 model.safetensors。9 个 = 594 GB/arm。node-A 余 3.1 T、
+    node-B 余 1.7 T，本轮够用。训练结束且确认无需续跑后，可删除除最后一个以外的
+    global_step*/ 回收约 456 GB/arm。不要在训练进行中删——续跑要用最近的优化器状态。
+
+issues:
+  - id: ISSUE-001
+    at: "2026-09-07T01:02:00+08:00"
+    symptom: >
+      node-B 上 arm B 的四点评测链在同一秒内「全部完成」，四个输出目录各 0 行，
+      但退出码为 0，日志只有一行 "at least one shard failed"。
+    evidence: >
+      logs/eval/.../cot_step78/shard_00.log:
+      "run_mindcube_eval.sh: line 30:
+       /home/c30084464/miniconda3/envs/spatialstack-qwen35/bin/python: No such file or directory"
+      ssh opsd2 'ls ~/miniconda3/envs' -> 只有 sr_opsd 与 vision-opd。
+    root_cause: >
+      run_mindcube_eval.sh 把评测用 python 硬编码成 spatialstack-qwen35 的绝对路径。
+      该环境只存在于 node-A；node-B 没有，8 个分片全部瞬间退出。
+      我在外层用了 `| tail -12`，把分片的真实报错吞掉了，所以表现为静默失败。
+    solution: >
+      (1) 驱动改为在 {spatialstack-qwen35, sr_opsd} 里自动挑第一个可执行的 python，
+          找不到就报错退出；(2) 增加 transformers==5.3.0 断言，版本不符直接失败而不是
+          出一份不可比的分数；(3) 本轮 node-B 上先用 PYTHON= 覆盖启动，未改远端文件。
+    status: resolved
+    prevention: >
+      跨节点脚本不要硬编码 conda 环境绝对路径。评测口径相关的依赖版本要在脚本里断言，
+      不要依赖「两个节点应该一样」的假设。包裹命令时不要用 tail/head 截断错误输出。
+    comparability_note: >
+      已核对 node-B/sr_opsd 与 node-A/spatialstack-qwen35 三项一致：
+      transformers 5.3.0、torch 2.10.0+cu129、python 3.12.13；
+      且 node-B 现存 eval_mindcube_qwen35.py 与本地仅差新增的 --limit（全量评测不使用）。
+      故 arm B 的分数与锚点、arm A 可比。
+
+activity_log:
+  - at: "2026-09-06T23:15:00+08:00"
+    what: >
+      数据转换完成，9999/9999 通过全部自洽门禁；注册两个数据集 + images 软链；
+      prepare_image_inputs 加 bypass 开关并实测 300 token 与评测侧对齐；
+      train.sh 加五个环境变量覆盖且默认值实测不变；评测脚本 6 行冒烟端到端跑通。
+  - at: "2026-09-06T23:20:00+08:00"
+    what: "启动基座 tinybench 锚点（node-A 8 卡）"
+  - at: "2026-09-06T23:41:00+08:00"
+    what: >
+      node-B 启动 arm B（CoT）。核对启动参数与登记一致：use_vggt_image_preprocess=false、
+      max_pixels=1605632、epochs=2、save_steps=39、grad_accum=8、lr=1e-5、
+      use_geometry_encoder=false。实际总步数显示 314，据此订正登记的 312。
+  - at: "2026-09-06T23:51:00+08:00"
+    what: >
+      基座锚点收口：1050 行合并完成，overall 46.86，unreadable 0.00%，
+      每图视觉 token 中位 300（与训练侧一致，视觉口径门禁通过）。node-A 八卡释放。
+  - at: "2026-09-06T23:52:00+08:00"
+    what: "node-A 启动 arm A（answer-only），与 arm B 逐项同参，仅换标注文件。"
+  - at: "2026-09-07T00:15:00+08:00"
+    what: >
+      发现单 checkpoint 66 GB（57 GB 是优化器状态）。核对 save_total_limit=10 > 实际 9 个，
+      早期 checkpoint 不会被删；两节点磁盘余量够，本轮不动。
+  - at: "2026-09-07T00:45:00+08:00"
+    what: >
+      修两个评测侧问题：(1) checkpoint 缺 preprocessor_config.json 等 4 个 processor 资产，
+      从基座补齐；(2) run_mindcube_eval.sh 的 LIMIT_ROWS 误接到 --rows（数据路径），
+      给 eval 脚本加了真正的 --limit 并改正驱动。另核对 checkpoint 与基座的 chat_template
+      哈希一致（a4aee8afcf2e0711），锚点与各 checkpoint 的模板口径相同。
+  - at: "2026-09-07T01:01:00+08:00"
+    what: >
+      arm A 训练 + 四点评测完成：46.86 -> 74.48（+27.6 pp），unreadable 全程 0%。
+      随后做了 train/tinybench 污染检查，图片与场景零重叠，结论干净。
+  - at: "2026-09-07T01:05:00+08:00"
+    what: "arm B 训练完成（314 步 / 1h14m50s，无 OOM），node-B 启动四点评测。"
+  - at: "2026-09-09T10:08:00+08:00"
+    what: >
+      按用户要求删除两机 SFT 权重目录 output/20260906_qwen35_mindcube_sft_{answeronly,cot}
+      （node-A 约 612G，node-B 约 612G）。评测 logs/eval/20260906_qwen35_mindcube_sft/ 未动。
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-07T09:40:00+08:00"
+  current_task: >
+    本轮结束。锚点 + 两条 arm 各四点全部测完，配对检验与曲线图已产出
+    （experiments/reports/figs/mindcube_qwen35_sft_curve.png）。
+    两节点 GPU 均已释放，无在跑作业。
+  next_actions:
+    - >
+      磁盘回收（未做）：两条 arm 共 18 个 checkpoint 约 1.2 TB，其中每个的
+      global_step*/ 占 57 GB 且评测用不到。确认不再续跑后删除除末个以外的
+      global_step*/，可回收约 900 GB。
+    - >
+      arm A 到 314 步仍在上升未饱和，值得加预算（如 4 epoch）看是否继续涨；
+      arm B 156 步后已走平，加预算大概率无用。
+    - >
+      互补性摆在那里（oracle 上限 86.38% vs 最好单条 74.48%）：
+      A 强在 among、B 强在 around，可考虑混合监督或按题型选路。
+    - "若要声称空间能力提升而非 in-domain 拟合，需要一个 out-of-domain 空间基准。"
+  owner: cursor-window-mindcube

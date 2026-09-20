@@ -278,9 +278,16 @@ def _load_sglang():
     return SGLangReplica
 
 
+def _load_hf():
+    from verl.workers.rollout.geometry_hf_rollout import GeometryHFReplica
+
+    return GeometryHFReplica
+
+
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
+RolloutReplicaRegistry.register("hf", _load_hf)
 
 
 # Original function for backward compatibility

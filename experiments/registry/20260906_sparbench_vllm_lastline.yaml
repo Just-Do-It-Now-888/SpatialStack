@@ -1,0 +1,75 @@
+experiment_id: 20260906_sparbench_vllm_lastline
+title: "SPAR-Bench vLLM lastline（无 boxed）：基座 vs SPAR3 K=1 step 55 greedy @2048"
+status: completed
+completed_at: "2026-09-06T21:02:00+08:00"
+created_at: "2026-09-06T20:10:00+08:00"
+owner: cursor-window-mvopsd
+
+goal: >
+  对外 SPAR-Bench 唯一口径：VSI 同类 answer_tail 末行解析，题面要求答案放最后一行，
+  不用 \\boxed{}。引擎 vLLM TP=8 greedy @2048。不可与 HF/lmms-eval 或 6.63@100tok 并列。
+
+protocol:
+  launcher: scripts/opsd/run_sparbench_vllm_lastline.sh
+  harness: scripts/opsd/tools/eval_sparbench_vllm.py
+  python: conda sr_opsd
+  SPARBENCH_PROTOCOL: lastline
+  lastline_suffix: " The final answer MUST BE put on the last line of your response."
+  boxed: false
+  decoding: greedy
+  max_tokens: 2048
+  max_model_len: 16384
+  tensor_parallel_size: 8
+  disable_thinking: true
+  scoring: >
+    MCA 末行 extract_vsibench_option（非字母金标则末行 exact_match）；
+    NA extract_vsibench_number；VCI 末行 parse_instruction
+
+models:
+  base: models/Qwen3.5-4B
+  spar3: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+
+arms:
+  base:
+    node: node-B
+    status: done
+    overall: 39.7195
+    truncated_pct: 5.3
+    output_root: logs/eval/20260906_sparbench_vllm_lastline/base
+    summary_json: logs/eval/20260906_sparbench_vllm_lastline/base/summary.json
+    completed_at: "2026-09-06T21:02:00+08:00"
+  k1_step55:
+    node: node-A
+    status: done
+    overall: 42.1612
+    truncated_pct: 2.5
+    delta_vs_base: 2.44
+    output_root: logs/eval/20260906_sparbench_vllm_lastline/spar3_step55
+    summary_json: logs/eval/20260906_sparbench_vllm_lastline/spar3_step55/summary.json
+    completed_at: "2026-09-06T20:55:55+08:00"
+
+comparability:
+  do_not_mix:
+    - "20260902 SPAR-Bench HF official 39.88 / 13.87"
+    - "20260901 step55 6.63（100 tok + until=\\n\\n）"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-06T21:05:00+08:00"
+  current_task: "两臂 rc=0；对照表 SPAR 只报 vLLM lastline"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: ""
+
+issues: []
+activity_log:
+  - at: "2026-09-06T21:05:00+08:00"
+    what: >
+      全部完成。lastline vLLM：基座 39.72（截断 5.3%）/ SPAR3 42.16（2.5%），Δ +2.44。
+      对照表已更新。两机 8 卡已释放。
+  - at: "2026-09-06T20:55:55+08:00"
+    what: "SPAR3 step55 完成 rc=0，overall 42.16，46 min。"
+  - at: "2026-09-06T20:10:00+08:00"
+    what: "登记 vLLM lastline 协议并启动双机。"

@@ -1,0 +1,108 @@
+experiment_id: 20260914_teacher_keyframe_probe
+title: "Teacher 关键帧 vs 全相册：oracle required_views 配对精度探测"
+status: completed
+
+created_at: "2026-09-14T18:30:00+08:00"
+finished_at: "2026-09-14T18:49:00+08:00"
+owner: cursor-window-mvopsd
+
+goal: >
+  在同一批 SPAR 训练题上，比较冻结 Qwen3.5-4B Teacher 仅看 required_views 关键帧
+  与看完整相册（全 N 帧）时的作答正确率差异，评估「关键帧 teacher」是否可在几乎
+  不掉精度的情况下替代全视频 teacher。
+
+hypothesis: >
+  spar_32view 上关键帧平均约 3.1 张（full 32 张），若 Δacc ≈ 0 则支持降本；
+  spar_3view 仅省约 1.1 帧，预期 Δacc 接近 0 且不构成主决策依据。
+  结果：spar32 Δacc ≈ −0.6pp（支持降本）；spar3 Δacc ≈ +2.8pp（帧差太小，噪声主导）。
+
+relations:
+  follows: 20260820_teacher_reliability
+  note: >
+    20260820 的 sweep 使用均匀间隔采样且排除 required_views!=[] 的样本；
+    本实验使用 oracle required_views 并保留 Frame-N 题面。
+
+design:
+  keyframe_definition: required_views = marked_views ∪ body Frame-N refs ∪ anchor(frame 0)
+  arms:
+    full: "0..N-1 全部帧，题面不变"
+    key: "sorted(required_views)，Frame-N 按子集重编号"
+  pools:
+    spar32:
+      source: spar_32view
+      sampled: 1000
+      per_type: 250
+      mean_key_frames: 3.11
+    spar3:
+      source: spar_3view
+      sampled: 500
+      mean_key_frames: 1.87
+  builder: scripts/opsd/build_teacher_keyframe_sweep.py
+  driver: scripts/opsd/run_teacher_keyframe_probe.sh
+  summarize: scripts/opsd/tools/summarize_keyframe_probe.py
+  protocol:
+    model: models/Qwen3.5-4B
+    env: sr_opsd
+    generation: teacher_eval_core greedy @1024, no system turn
+    scoring: score_teacher_dump.py rule tier (judge 未跑；方向题 judge_queue 已落盘)
+  runtime:
+    gpu: "CUDA_VISIBLE_DEVICES=0 TP=1 GPU_MEMORY_UTILIZATION=0.35"
+    wall: "~17 min (3000 rows)"
+
+artifacts:
+  parquet: data/mvopsd/parquet_keyframe_sweep/
+  logs: logs/eval/teacher_keyframe_probe/
+  paired:
+    spar32: logs/eval/teacher_keyframe_probe/spar32/paired_summary.json
+    spar3: logs/eval/teacher_keyframe_probe/spar3/paired_summary.json
+
+evaluation:
+  status: done
+  scoring_note: >
+    规则层直接判分（与 20260820 同管线）；未跑 judge 二层。
+    spar32 judge_queue 374 行（主要为 direction），配对 Δacc 在同等规则下仍可比较。
+  results:
+    spar32:
+      pairs: 1000
+      full_acc: 21.98
+      key_acc: 21.36
+      delta_acc: -0.62
+      mean_key_views: 3.11
+      mean_full_views: 32.0
+      by_type_delta:
+        distance_infer_center_oo_video: 4.40
+        distance_prediction_oo_video: -7.28
+        spatial_imagination_oc_video: 0.80
+        spatial_imagination_oo_video: -0.40
+    spar3:
+      pairs: 500
+      full_acc: 31.29
+      key_acc: 34.08
+      delta_acc: 2.79
+      mean_key_views: 1.87
+      mean_full_views: 3.0
+  conclusion: >
+    spar_32view 上将 teacher 从 32 帧截到 oracle 关键帧（~3 帧）几乎不改变规则层正确率
+    （Δ −0.6pp），支持在 MV-OPSD teacher 侧用 required_views 降本。
+    spar_3view 仅省 ~1 帧，Δ 不具决策意义。
+    distance_prediction_oo_video 在 spar32 上 key 更差（−7.3pp），若采用关键帧 teacher
+    需对该题型单独验证或保留额外上下文帧。
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-14T18:49:00+08:00"
+  next_action: >
+    可选：对 judge_queue 跑 judge 二层复核绝对分数；若改 MV-OPSD teacher 输入，
+    先在 spar_32view 上实现 required_views teacher 臂并小规模蒸馏验证。
+
+issues: []
+
+activity_log:
+  - at: "2026-09-14T18:30:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "实现 builder/tests/driver；smoke 配对链路通过"
+    result: "修复 carry_fields 列表序列化；smoke 用 limit-rows 保持 full/key 配对"
+  - at: "2026-09-14T18:49:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "全量 3000 行生成+规则判分+配对汇总"
+    result: "spar32 Δacc −0.62pp；spar3 Δacc +2.79pp；墙钟约 17 分钟（单卡）"

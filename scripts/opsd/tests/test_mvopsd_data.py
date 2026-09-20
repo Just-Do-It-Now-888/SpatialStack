@@ -132,6 +132,37 @@ def test_view_budget_distribution_covers_the_menu():
     assert budgets == {1, 2, 4}
 
 
+def test_spar3_nested_k_pins_required_and_nests():
+    """K=1 ⊂ K=2, required views sit in both, teacher album stays 3."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    from build_spar3_student_k_plans import nested_student_views, retarget
+
+    record = {
+        "sample_id": "spar3/nested",
+        "n_views": 3,
+        "teacher_view_indices": [0, 1, 2],
+        "required_views": [1],
+        "body": " In Frame-1, how far is the chair?",
+        "teacher_body": " In Frame-1, how far is the chair?",
+        "header_style": "frame_labels",
+        "view_selection": "oracle_guided",
+    }
+    rng = random.Random(0)
+    subsets = nested_student_views(record, rng)
+    assert subsets is not None
+    assert subsets["k1"] == [1]
+    assert set(subsets["k1"]) < set(subsets["k2"])
+    assert len(subsets["k2"]) == 2
+    assert 1 in subsets["k2"]
+
+    k1 = retarget(record, subsets["k1"])
+    assert k1["k_views"] == 1
+    assert vw.referenced_views(k1["student_body"]) <= {0}
+
+    too_many = dict(record, required_views=[0, 1])
+    assert nested_student_views(too_many, random.Random(0)) is None
+
+
 # --- SPAR markers -------------------------------------------------------------
 
 def test_marker_discovery_reports_the_views_the_draw_function_touches():

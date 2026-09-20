@@ -15,6 +15,8 @@ this module writes is what makes teacher and student pixel-identical.
 
 from __future__ import annotations
 
+import math
+
 from PIL import Image
 
 VGGT_TARGET_SIZE = 518
@@ -60,6 +62,63 @@ def resize_to_sft_geometry(image: Image.Image) -> Image.Image:
     image = image.crop((0, 0, width, height))
     assert_aligned(image.size)
     return image
+
+
+def pixel_budget_size(width: int, height: int, min_pixels: int, max_pixels: int) -> tuple[int, int]:
+    """``smart_resize`` at the Qwen3.5 alignment factor: scale to fit, never crop.
+
+    This is the transform ``resize_to_sft_geometry`` is *not*. The VGGT chain
+    centre-crops height, which costs 24.5% of the frame on a 480x640 portrait
+    image and so was switched off for the MindCube SFT round (registry
+    20260906_qwen35_mindcube_sft). But simply copying the source instead is also
+    wrong, and silently so: MindCube ships 480x640 (79% of views), 2016x1512,
+    4032x3024 and six other sizes, and verl's two image paths disagree about
+    them. The student runs ``fetch_image`` with the parquet's min/max pixels; the
+    teacher runs a bare ``Image.open`` and inherits the processor's own bounds
+    (65536 / 16777216). On a 4032x3024 source that is 1,568 student tokens
+    against 11,844 teacher tokens per view -- resolution becomes a second
+    privileged axis, and four such views overrun ``max_reprompt_len`` and get
+    truncated with no error.
+
+    Writing the cache at the student's own budget makes both paths identity
+    transforms, which is the invariant this module exists to hold. It also
+    reproduces what SFT fed: its processor applies the same rule at the same
+    factor with the same bounds.
+    """
+    factor = ALIGN_FACTOR
+    height_bar = max(factor, _round_by_factor(height, factor))
+    width_bar = max(factor, _round_by_factor(width, factor))
+    if height_bar * width_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        height_bar = max(factor, _floor_by_factor(height / beta, factor))
+        width_bar = max(factor, _floor_by_factor(width / beta, factor))
+    elif height_bar * width_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        height_bar = _ceil_by_factor(height * beta, factor)
+        width_bar = _ceil_by_factor(width * beta, factor)
+    return width_bar, height_bar
+
+
+def resize_to_pixel_budget(image: Image.Image, min_pixels: int, max_pixels: int) -> Image.Image:
+    """Resize into ``[min_pixels, max_pixels]`` with both sides aligned, no crop."""
+    image = image.convert("RGB")
+    width, height = pixel_budget_size(*image.size, min_pixels=min_pixels, max_pixels=max_pixels)
+    if (width, height) != image.size:
+        image = image.resize((width, height), Image.Resampling.BICUBIC)
+    assert_aligned(image.size)
+    return image
+
+
+def _round_by_factor(value: float, factor: int) -> int:
+    return round(value / factor) * factor
+
+
+def _ceil_by_factor(value: float, factor: int) -> int:
+    return math.ceil(value / factor) * factor
+
+
+def _floor_by_factor(value: float, factor: int) -> int:
+    return math.floor(value / factor) * factor
 
 
 def assert_aligned(size: tuple[int, int]) -> None:

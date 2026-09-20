@@ -1,0 +1,65 @@
+experiment_id: 20260908_cvbench_vllm_boxed
+title: "CV-Bench boxed last-line：vLLM greedy，基座 vs SPAR3 K=1 step 55"
+status: completed
+created_at: "2026-09-08T18:24:00+08:00"
+finished_at: "2026-09-08T18:34:05+08:00"
+owner: cursor-window-mvopsd
+
+goal: >
+  用户要求回到 \\boxed{} 作答形式，但用 vLLM 推理重测基座与 SPAR3。
+  题面后缀与 HF 88.07/85.05 相同（BOXED_LASTLINE_SUFFIX），解析 boxed_lastline。
+  引擎与 71.04 lastline 那次相同（vLLM TP=8 greedy @1024），只换题面+解析。
+
+environment:
+  conda_env: sr_opsd
+  nodes: node-A
+  gpus_per_node: 8
+  gpu_type: H20
+
+models:
+  base: models/Qwen3.5-4B
+  spar3: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+
+evaluation:
+  status: completed
+  entrypoint: scripts/opsd/run_cvbench_vllm_boxed_chain.sh
+  command: >
+    setsid nohup bash scripts/opsd/run_cvbench_vllm_boxed_chain.sh
+    > logs/eval/20260908_cvbench_vllm_boxed/driver.log 2>&1
+  parameters:
+    prompt_suffix: " The final answer MUST BE put in \\boxed{} on the last line of your response."
+    parser: boxed_lastline
+    decoding: greedy
+    max_tokens: 1024
+    engine: vLLM TP=8
+  artifacts:
+    eval_root: logs/eval/20260908_cvbench_vllm_boxed
+  metrics:
+    base: 87.62
+    spar3: 85.23
+    delta: -2.39
+    base_2d: 83.15
+    base_3d: 92.08
+    spar3_2d: 80.04
+    spar3_3d: 90.42
+    answered_pct: [99.39, 99.81]
+    trunc_pct: [0.61, 0.08]
+    vs_hf_boxed: "88.07/85.05 → 87.62/85.23 (−0.45 / +0.18)"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-08T18:35:00+08:00"
+  active_job_id: null
+  owner: cursor-window-mvopsd
+  resources: "node-A 8×H20 idle"
+  next_action: none
+
+issues: []
+
+activity_log:
+  - timestamp: "2026-09-08T18:24:00+08:00"
+    event: launched
+    detail: "node-A GPUs idle; HF boxed dumps not regenerated"
+  - timestamp: "2026-09-08T18:34:05+08:00"
+    event: completed
+    detail: "87.62 / 85.23 (−2.39); scores written to 评测对照"

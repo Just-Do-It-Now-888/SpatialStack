@@ -1,0 +1,97 @@
+experiment_id: 20260902_spar3_k1_step55_blink_spatial
+title: "SPAR3 K=1 step 55：BLINK-Spatial（项目默认协议）"
+status: completed
+completed_at: "2026-09-02T11:48:33+08:00"
+
+created_at: "2026-09-02T11:40:00+08:00"
+owner: cursor-window-mvopsd
+node: node-A
+
+goal: >
+  用户要求对 SPAR3 K=1 训练内最佳 checkpoint（step 55）评测 BLINK。
+  使用本仓库默认的 blink_spatial 分组（3 个空间子任务，val，宏平均），
+  不是官方 14 项全量。
+
+parent: 20260831_mvopsd_spar3_student_k
+checkpoint:
+  fsdp: checkpoints/20260831_mvopsd_spar3_k1_epoch1_nothink/global_step_55
+  hf: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+  train_val_acc: 0.4923
+  train_val_protocol: "boxed_lastline + sample t=1.0/top_p=0.8, JUDGE=0"
+
+protocol:
+  launcher: scripts/evaluation/eval.sh
+  conda_env: sr_opsd
+  benchmark: blink_spatial
+  split: val
+  tasks:
+    - blink_multi_view_reasoning
+    - blink_relative_depth
+    - blink_spatial_relation
+  aggregate: "blink_acc, weight_by_size=False (macro)"
+  prompt: "letter-only pre_prompt + dataset prompt; no boxed suffix"
+  parser: "utils._extract_answer_letter (start-of-string)"
+  decoding: greedy
+  max_new_tokens: 1024
+  disable_thinking: true
+  model_impl: qwen3_5
+  hf_offline: true
+  note: >
+    与训练内 boxed last-line / VSI greedy 48.06 不可并列。
+    9/1 generalization 的 blink_spatial 目录为空，本次是首次完整跑。
+
+output_root: logs/eval/20260902_spar3_k1_step55_blink_spatial
+results_json: logs/eval/20260902_spar3_k1_step55_blink_spatial/20260902/blink_spatial/output__20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf/20260902_114454_results.json
+
+results:
+  n: {multi_view: 133, relative_depth: 124, spatial_relation: 143}
+  blink_spatial_macro: 13.05
+  blink_multi_view_reasoning: 0.00
+  blink_relative_depth: 0.00
+  blink_spatial_relation: 39.16
+  parse_note: >
+    句首字母协议下的分数。模型几乎从不把选项字母放在开头：
+    multi-view / depth 以 "To determine..." 起笔，解析成 T，0 分；
+    spatial_relation 大量 "Based on..."，解析成 B，得 39%。
+    这是 LESSON-011 同类假象，不是空间能力读数。
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-02T11:50:00+08:00"
+  current_task: "BLINK-Spatial 协议分 13.05 已落盘"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: "对外勿把 13.05 当能力分；若要比能力需改解析/题面"
+
+issues:
+  - id: ISSUE-001
+    at: "2026-09-02T11:42:01+08:00"
+    symptom: >
+      lmms-eval 在 load_from_disk 后立刻失败：Dataset 没有 .copy()。
+    evidence: >
+      nohup.out AttributeError: 'Dataset' object has no attribute 'copy'
+      （task.py:1066）。本地 BLINK 子任务是单 split Dataset（val，133/124/143 条），
+      不是 DatasetDict。9/1 blink_spatial 空目录同源。
+    root_cause: >
+      load_from_disk 返回 Dataset 时，download() 仍按 DatasetDict 迭代 split。
+    solution: >
+      若 loaded 是 Dataset，包成 DatasetDict({test_split or val: loaded})。
+    status: resolved
+    prevention: >
+      本地 dump 后断言 keys() 含 val/test；评测启动后数分钟无 Model Responding
+      先查 download 而不是等 NCCL abort。
+
+activity_log:
+  - at: "2026-09-02T11:48:33+08:00"
+    what: >
+      评测结束 status=0。宏平均 13.05（0 / 0 / 39.16）。8 卡已释放。
+  - at: "2026-09-02T11:45:07+08:00"
+    what: >
+      ISSUE-001 修复后重跑。wrapper 3272401 / MASTER_PORT=29531；
+      已进入 Model Responding 0/51（8 卡各约 51 条）。日志 nohup_r2.out。
+  - at: "2026-09-02T11:41:33+08:00"
+    what: >
+      启动。wrapper 3269247 / eval.sh 3269343；MASTER_PORT=29530；
+      HF_HUB_OFFLINE=1；日志 logs/eval/20260902_spar3_k1_step55_blink_spatial/nohup.out。

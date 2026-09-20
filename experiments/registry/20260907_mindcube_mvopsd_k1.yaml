@@ -1,0 +1,487 @@
+experiment_id: 20260907_mindcube_mvopsd_k1
+title: "MindCube MV-OPSD K=1：teacher 全视图 / student 单视图，两机各从本机最优 SFT 起跑"
+status: completed  # planned | queued | running | completed | failed | cancelled
+
+created_at: "2026-09-07T12:30:00+08:00"
+started_at: "2026-09-07T16:05:00+08:00"  # arm A；arm B 顺序接在后面
+owner: "cursor-window-mindcube-opsd"
+
+goal: >
+  在 MindCube 上跑一轮 MV-OPSD（视角特权自蒸馏）：teacher 看全部 N 个视图，
+  student 只看 1 个视图（K=1）。两台机器各用本机最好的 SFT checkpoint 初始化——
+  node-A 用 answer-only 臂（tinybench 74.48），node-B 用 CoT 臂（69.81）——
+  使跨机唯一的配置变量是 SFT 监督类型。训练内验证用满视图 MindCube tinybench，
+  与 46.86 / 74.48 / 69.81 三个锚点落在同一根轴上。
+
+hypothesis: >
+  student 在单视图下被迫向满视图 teacher 的分布靠拢，若「视角特权」这条轴真的传递了
+  空间信息，单视图 tinybench 应上升；满视图 tinybench 至少不塌。
+  反面假设同样具体：13% 的 pair 行证据缺失（见下），若只有满视图分数动而单视图不动，
+  更可能是学到了答案字母先验（LESSON-022）而不是空间能力。
+
+design:
+  privilege_axis: view_subset
+  teacher_views: "全部 N（2/3/4）"
+  k_views_student: 1
+  teacher_mode: teacher_image_key   # 不是 answer_hint
+  init_per_node: "各用本机最优 SFT checkpoint，唯一变量是 SFT 监督类型"
+  init_node_a: output/20260906_qwen35_mindcube_sft_answeronly/checkpoint-314
+  init_node_b: output/20260906_qwen35_mindcube_sft_cot/checkpoint-314
+  deviation_from_vision_opd: >
+    Vision-OPD 原始设定是从**已发布的通用 checkpoint** 蒸馏，本轮从**任务内 SFT**
+    checkpoint 蒸馏，是刻意偏离。因此本轮曲线不与任何历史 MV-OPSD run 并列，
+    只与本轮自己的 step 0 以及同源 SFT 锚点对读。
+  pool_decision: >
+    用户决策（2026-09-07）：使用 MindCube 训练集**全部 9,999 条**，不做任何过滤，
+    K=1 一律成立。K=1 相对 K=2 在池子大小上不花任何代价（同样的行都合格），
+    却把特权比从 2.0 提到最高 4.0。仓内先例支持更大的 gap：
+    20260831_mvopsd_spar3_student_k 中 K=1（N/K=3.0）训练内 +2.96 pp（46.27 → 49.23 @ step55），
+    K=2（N/K=1.5）在同一嵌套池上只有 +0.37 pp。
+  source_plan: data/mvopsd/plan_mindcube_k1/
+  train_file: data/mvopsd/parquet_mindcube_k1/main_train.parquet
+  train_rows: 9999
+  holdout_rows: 0   # 训练内验证用 tinybench，不切 holdout
+
+pool_composition:
+  # 实测自 data/mvopsd/plan_mindcube_k1/summary.json，与 parquet 逐项一致
+  by_data_source:
+    mindcube_among_4view: 7055      # 6,491 有锚点 + 564 无锚点
+    mindcube_pair_2view: 1302       # 1,000 among + 302 aroundnew，题面保留原文
+    mindcube_around_3view: 778
+    mindcube_rotation_2view: 366
+    mindcube_rotation_4view: 360
+    mindcube_rotation_3view: 138
+  by_view_selection:
+    anchored: "有唯一锚点，student 保留锚点视图"
+    pure_random: "564 条无锚点，随机抽一张"
+    pair_first_view: "1,302 条 pair，取第一视图"
+  privilege_ratio: {"4.0": 7415, "3.0": 916, "2.0": 1668}
+  mean_teacher_views: 3.57
+  why_data_source_carries_family_and_n: >
+    rotation 需要单独桶，因为 K=1 时它的前提句被删除，那 864 条没有任何参照系陈述；
+    N 要进 key，因为 gap 跨 2.0–4.0，混在一起平均会掩盖到底是哪个 gap 起了作用。
+
+accepted_cost_pair_rows:
+  rows: 1302
+  fraction: 0.130
+  what: >
+    「Based on these two views showing the same scene: in which direction did I move
+    from the first view to the second view?」没有单视图形式——问题的主语就是两个视图
+    之间的位移。按用户选定协议，这些行**保留原始题面**同时只收到一张图。
+  consequence: >
+    对这 13% 的池子，题面引用了 student 看不到的视图，标签从其输入不可恢复，
+    只能传递 teacher 的字母先验。它们有独立 data_source（mindcube_pair_2view），
+    事后可分离而不需要重建池子；parquet 的 extra_info.prompt_matches_view_count=false
+    是同一信息的第二个入口。
+  first_suspect_rule: >
+    若运行中输出格式或指令跟随退化，先查这批行，而不是先质疑方法。
+    先例：LESSON-011 / LESSON-018（格式退化在分数上与能力丢失无法区分）、
+    LESSON-022（证据缺失的题目测的是先验）。
+
+two_corrections_baked_in:
+  - "rotation 是**最**可约的家族，不是最不可约的：它是围绕一个具名视图的心理旋转，
+     减少 student 视图使它更难，而不是无解。"
+  - "锚点必须在**删除前提句之后**统计，不是之前。前提句在 K=1 时无论如何都要删，
+     它引用的图号从来就不是对 student 视图的约束。按正确顺序统计，每条 rotation 都恰有一个锚点。"
+
+image_geometry:
+  decision: "MindCube 视图**不过** resize_to_sft_geometry()（VGGT 518 宽居中裁切链）"
+  why: >
+    VGGT 的 crop 在竖图上砍掉 24.5% 的高度，而 MindCube 93.5% 是竖图；
+    20260906 的 SFT 轮正是为此把它关掉的（见该 registry 的 coupled_fix）。
+  but_not_a_plain_copy: >
+    直接原图拷贝也是错的，而且是静默的错：MindCube 有 480×640（79%）、2016×1512、
+    4032×3024 等 9 种尺寸，而 verl 的两条图像路径对它们的处理不一致——student 走
+    fetch_image 读 parquet 的 min/max_pixels，teacher 走裸 Image.open 继承 processor
+    自己的界（65536 / 16777216）。4032×3024 上是 student 1,568 token 对 teacher 11,844 token，
+    分辨率会变成第二条特权轴，且四张这种图会溢出 max_reprompt_len 而被无声截断。
+  implementation: >
+    scripts/opsd/mvopsd/geometry.py 新增 pixel_budget_size / resize_to_pixel_budget
+    （smart_resize 同规则、同 factor 32、同上下界，只缩放不裁切）；
+    plan 的每个 frame 带 geometry:"pixel_budget"，materialize_mvopsd_views.py 按此分派。
+    默认仍是 GEOMETRY_SFT_VGGT，历史池子的行为逐字不变。
+  pixel_caps: {min_pixels: 200704, max_pixels: 1605632}
+  caps_are_written_where: >
+    parquet 里每个 image dict（train 与 val 都写）。verl 自己没有 min_pixels 旋钮，
+    它是从 parquet 透传到 qwen_vl_utils.fetch_image 的。
+  measured:
+    distinct_cached_sizes:
+      "480x640": 2207
+      "1440x1088": 402
+      "608x352": 65
+      "544x416": 59
+      "416x544": 31
+      "1280x960": 14
+      "640x352": 5
+      "1088x1440": 1
+      "800x608": 1
+    visual_tokens_per_image_median: 300      # 与 20260906 SFT 轮记录的 300 逐字一致
+    visual_tokens_per_image_p95: 1530        # 2016×1512 类大图被 max_pixels 缩到 1440×1088
+    peak_teacher_visual_tokens: 6120         # 4 视图最坏情况，< max_reprompt_len 12288
+    student_k1_tokens: {median: 300, mean: 450, max: 1530}
+  gate_result: >
+    check_mvopsd_geometry.py --parquet（新增模式，直接读 parquet 里的 image dict，
+    连 pixel caps 一起验）400 样本 / 1,434 视图：student 与 teacher 路径在**每一个**
+    视图上尺寸与像素完全一致，image_grid_thw 全部等于预期。81.9% 的视图恰好 300 token。
+
+system_turn:
+  value: "You are a helpful assistant."
+  why: >
+    MindCube SFT 轮每条样本都带 data_qwen.py 的这句 system，tinybench 评测也发同一句。
+    从那两个 checkpoint 初始化的池子必须照带，否则 student 一开始就在分布外。
+    SPAR/llava 那些池子刻意不带——它们从未经 SFT 的基座蒸馏，基座也没有 system turn。
+
+validation:
+  in_loop_fullview:
+    benchmark: "MindCube tinybench 1,050 条，满视图，greedy"
+    protocol_source: scripts/mindcube/eval_mindcube_qwen35.py
+    comparable_to: "46.86（基座）/ 74.48（node-A 初始化）/ 69.81（node-B 初始化）"
+  in_loop_singleview:
+    why: >
+      满视图验证测的不是训练真正针对的任务。SPAR3 的 K 臂是警示案例：训练内 +2.96 pp
+      与同一 checkpoint 在 CV-Bench（85.05 vs 基座 88.07）、VSI original（47.87 vs 52.75）、
+      SPAR-Bench（13.87 vs 39.88）上**低于**基座同时成立。
+    rule: "两条序列永远不画成一根线，报数时必须写清视图数。"
+  train_eval_view_mismatch:
+    train: "74% 四视图（7,415 / 9,999），mean teacher views 3.57"
+    tinybench: "41% 四视图 / 33% 三视图 / 26% 二视图，mean 3.15"
+    sharpest: >
+      rotation 训练主要在四视图行上，评测**全部**是三视图行（tinybench 的 200 条
+      rotation 全是 N=3）。tinybench 必须按 family 与按 N 拆着读，不能只看池化平均。
+
+reading_discipline:
+  - "node-A 上 K=1 把 VOPD 退化成标签蒸馏，必须如实命名。arm A 只输出约 11 token
+     （answer 标签加一个字母），所以「teacher 在 student 自己 token 上的软目标」实际上
+     就是朝 teacher 字母分布的交叉熵。这是合法的 learning-under-privileged-information，
+     但不是推理蒸馏，不能那样写。node-B 约 319 token 的输出保留了更丰富的形式。"
+  - "两机因此蒸馏的 token 数差 30 倍。「只有初始化不同」对配置成立，对有效监督不成立；
+     两条曲线同时出现的场合都要带这条 caveat。"
+  - "response length 的 mean / median / p95 都要看（LESSON-020/029）：arm A 从 11 token
+     起步，爆炸空间最大，p95 抬头而 median 持平是最早的信号。"
+  - "JSD / vopd_loss 走平不能用来判断方法是否有效（LESSON-012，LESSON-029 再次确认）。"
+  - "满视图 tinybench 涨了不等于单视图空间推理变好，反之亦然。"
+  - "13% 的监督按设计是证据缺失的。任何 headline 增益都必须同时报出剔除
+     mindcube_pair_2view 后的同一数字。"
+
+primary_metric: "val-core/mindcube/overall/acc 走势（自比 step 0），以及 mindcube1v 单视图同步序列"
+
+environment:
+  # 两机的训练环境（系统 python3.12 + ~/.local，LESSON-007）在本轮开工时并不一致，
+  # 见 issues ISSUE-701。以下是修复后的实测值。
+  shared:
+    python: "3.12.3"
+    transformers: "5.5.0（两机同一份，node-A 从 node-B rsync 恢复）"
+    vllm: "0.18.0"
+    flash_attn: "2.7.4.post1"
+    qwen_vl_utils: "0.0.14（两机一致）"
+  node_a:
+    torch: "2.10.0a0+b558c986e8.nv25.11"
+    cuda: "13.0"
+    nccl: "2.28.8"
+    numpy: "2.2.6"
+    pillow: "11.3.0"
+    triton: "3.3.0"
+  node_b:
+    torch: "2.10.0+cu128"
+    cuda: "12.8"
+    nccl: "2.27.5"
+    numpy: "1.26.4"
+    pillow: "12.0.0"
+    triton: "3.6.0"
+  cross_node_caveat: >
+    node-A 的系统镜像已被重建成 NGC nv25.11 / CUDA 13.0，node-B 仍是 cu128 轮子，
+    torch 构建、numpy、Pillow、triton 都不同。这是**除 SFT 监督类型之外的第二个跨机差异**，
+    不是设计的一部分。检出它的仪器是 step-0 训练内 tinybench 锚点门禁：每台机器必须
+    复现**它自己**在 conda transformers 5.3.0 下测出的锚点（node-A 74.48 / node-B 69.81）。
+    两机都过 → 两条图像与文本管线都与锚点管线一致，跨机对读成立；任一台不过 → 先修环境，
+    不要读曲线。SFT checkpoint 本身是用 conda spatialstack-qwen35（transformers 5.3.0）
+    产出的，本轮训练用 5.5.0，这个版本差同样由该门禁负责暴露。
+
+gates:
+  - id: gate_0_recoverability
+    kind: "强制测量，不阻塞"
+    what: >
+      池子已由决策定死，所以这条不再用来选 K；它的作用是量化有多少监督是证据缺失的，
+      任何后续增益都必须对着这个数来读。MindCube 自己的前提是每个相机「partially
+      captures the surroundings」，被问的物体可能就不在保留的那一帧里；证据缺失处
+      student 只能学答案字母的先验，而 vopd_loss 会愉快地下降（LESSON-022；
+      spar_32view 想象池就是在 teacher 只有 1.3% 时被放弃的）。
+    how: >
+      冻结的初始化模型在 tinybench 的两份 val parquet 上各跑全部 1,050 行（full-view 与
+      K=1 single-view），贪心解码，按 family / N / prompt 一致性分解为
+      coverage × accuracy-on-answered。脚本 scripts/opsd/probe_mindcube_recoverability.py，
+      驱动 scripts/opsd/run_mindcube_probe.sh。
+      **两条 arm 同机同引擎（node-B GPU 0/1，vllm 0.18.0）**，否则这个 gap 会与
+      跨机环境漂移混在一起（ISSUE-702）。
+    expectation: "mindcube_pair_2view 按构造应在随机水平，rotation 接近它。"
+    teacher_side: >
+      teacher 侧不需要探针，这正是本轮与失败的 SPAR 尝试的区别：冻结 teacher 就是
+      满视图的 SFT checkpoint，74.48%（arm A）/ 69.81%（arm B）。
+    result: >
+      PASS（测量完成，2026-09-07 15:11，1,050 行 × 2 预算 × 2 arm）。
+      报告：output/probes/mindcube_recoverability_arm{A,B}.json（+ _rows.json 存逐行响应）。
+    result_detail:
+      arm_a_answeronly:
+        fullview_acc: 74.29    # vs 离线 transformers 锚点 74.48，差 -0.19
+        singleview_acc: 59.24
+        gap: -15.05
+        coverage_singleview: 100.0
+        out_tok_median: {fullview: 11, singleview: 10}
+      arm_b_cot:
+        fullview_acc: 70.57    # vs 离线 transformers 锚点 69.81，差 +0.76
+        singleview_acc: 55.24
+        gap: -15.33
+        coverage_singleview: 100.0
+        out_tok_median: {fullview: 319, singleview: 261}
+    findings: >
+      1. **两条 arm 的 full-view 都复现了自己的离线锚点**（-0.19 / +0.76 pp），
+         所以 vLLM 与 transformers 的引擎差在这个任务上可忽略，
+         gate_3 的 step-0 门禁可以直接对着 74.29 / 70.57 这两个 vLLM 口径数字打。
+      2. **覆盖率 100%**：单视图下两条 arm 都仍输出可解析答案，没有拒答。
+         所以 -15 pp 全部来自答错而非不作答（LESSON-022 的分解在这里给的是干净结论）。
+      3. **pair 行确实不提供任何特权信号**，比设计预期更彻底：
+         arm A 在这 274 行上 full 47.45% → 1view 47.81%（**+0.36**），
+         arm B 52.55% → 49.64%（-2.92）。给全部 2 视图与只给 1 视图没有差别，
+         说明模型在这些题上本来就没在用第二个视图。这不只是「student 答不了」，
+         而是「teacher 也没有可传的东西」——蒸馏在这 13%（训练集）上是对字母先验的自我确认。
+      4. 剔除 pair 后的真实特权 gap：arm A -20.49、arm B -19.72（prompt_matches_views 桶，776 行）。
+         这是本轮实际可蒸馏的空间，也是任何增益该对照的分母。
+      5. 分解不对称，值得在读曲线时留意：
+         arm A 的 around_3view 几乎无损（81.38 → 80.69，-0.69），among_4view 却掉 -28.54；
+         arm B 的 around_3view 掉 -15.17。rotation 两条都伤得最重（-17.50 / -23.00）。
+         即「单视图可恢复性」高度依赖 family × N，不是一个全局常数。
+    val_set_caveat: >
+      tinybench 里 N=2 的 pair 行占 274/1,050 = 26%，而训练池里是 1,302/9,999 = 13%。
+      验证集的证据缺失比例是训练池的两倍，所以 overall 曲线被这部分稀释得更厉害；
+      读数时以 prompt_matches_views 桶为主，overall 只作对锚点的连续性检查。
+  - id: gate_1_no_vggt
+    kind: "硬门禁"
+    what: "MindCube 视图不过 resize_to_sft_geometry()"
+    result: "PASS（见 image_geometry.gate_result）"
+  - id: gate_2_300_tokens
+    kind: "硬门禁"
+    what: "每图视觉 token 中位 300，与 SFT 轮同一条字面检查"
+    result: "PASS，中位 300（1,174/1,434 视图恰好 300）"
+  - id: gate_3_smoke
+    kind: "硬门禁"
+    what: >
+      SMOKE=1 在 node-B：teacher_image_swap_fraction=1.0、policy_fallback_fraction=0、
+      teacher_probe 跨步恒定、step-0 训练内 tinybench 复现
+      **74.29（arm A）/ 70.57（arm B）**——用 gate_0 测出的 vLLM 口径值，
+      而不是 transformers 锚点 74.48 / 69.81。step 0 打不中就停下来修，不要读任何曲线。
+    result: >
+      PASS（arm A，2026-09-07 16:03，node-B 8 卡，2 步 / batch 8 / TEST_FREQ=1）。
+      日志 logs/train/smoke_armA_driver.log。
+    result_detail:
+      step0_overall_acc: 74.38      # 对探针的 vLLM 口径 74.29 差 +0.09 pp（1,050 行里 1 行）
+      step1_overall_acc: 74.57
+      step2_overall_acc: 74.19
+      answered_frac: 1.0
+      resp_tokens_median: 11        # 与 SFT 锚点的 11 一致
+      teacher_always_on_fraction: 1.0
+      teacher_image_swap_fraction: 1.0
+      policy_fallback_fraction: 0.0
+      grpo_fallback_count: 0
+      teacher_probe: 0.044563621282577515   # step 1 与 step 2 逐位相同 = 冻结 teacher 恒定
+      vopd_loss: {step1: 0.01082, step2: 0.02325}
+      n_views_teacher_mean: 3.375   # batch 8 上 2view 25% / 3view 12.5% / 4view 62.5%
+      time_per_step_s: {step1: 38.19, step2: 11.44}   # step1 含编译；按 11.4s 估 156 步约 30 min + 验证
+    逐桶对读探针: >
+      among_4view 92.34 与探针**逐位相同**，说明生成与判分路径一致。
+      小桶有 1-3 行的出入（around_3view 80.69 对 81.38、among_2view 46.75 对 48.52、
+      around_2view 48.57 对 45.71、rotation_3view 68.00 对 67.00），
+      来自训练内验证与探针的 vLLM batch 组成不同导致的 logits 末位差异，
+      贪心解码在临界样本上翻转；overall 只差 0.09 pp，在噪声内。
+    harmless_noise_recorded: >
+      两类启动期噪声，记下来免得以后误判为故障：
+      1. `Failed to import Triton kernels ... cannot import name 'SparseMatrix'` —— gpt_oss MoE
+         路径的报错，与 Qwen3.5-4B 无关（探针也报同一条且正常跑完）。
+      2. `Token indices sequence length is longer than ... (16386 > 12800)` / `(28682 > 12800)` ——
+         vLLM 显存探测用的 dummy 输入，全程只出现 3 次；真实数据最宽行 3,859 token。
+         若某次出现次数与行数同量级，那才是真的超长截断。
+      3. `_pickle.UnpicklingError: pickle data was truncated`（torch inductor 编译缓存）W 级警告，
+         之后正常重编译并继续。
+
+launch_plan:
+  total_steps: 156        # 9,999 / batch 64 ≈ 156，从 launch log 的 total_training_steps 核对
+  total_epochs: 1         # 保持 1，LESSON-032 不触发
+  test_freq: 10
+  save_freq: 10
+  rollout_n: 1
+  teacher: frozen
+  judge: 0                # MindCube 是选择题且有稳健抽取器
+  val_decoding: greedy
+  val_prompt_length: 3072  # 4 图 × 300 + 文本；VSI 的 11264 在这里是浪费
+  fallback_if_null_result: "同一池子上的 K=2，是记录在案的回退与天然的嵌套后续臂"
+
+artifacts:
+  plan: data/mvopsd/plan_mindcube_k1/
+  views_cache: data/mvopsd/views/mindcube/     # 2,785 个文件，9,999 行共享引用
+  train_parquet: data/mvopsd/parquet_mindcube_k1/main_train.parquet
+  val_parquet_fullview: data/eval/mindcube_verl/mindcube_val.parquet            # 1,050 行
+  val_parquet_singleview: data/eval/mindcube_verl/mindcube_val_singleview.parquet  # 1,050 行
+  probe_reports: output/probes/mindcube_recoverability_arm{A,B}.json
+  logs_node_a: logs/train/armB_driver.log    # node-A 跑 arm B（CoT），conda vision-opd
+  logs_node_b: logs/train/armA_driver.log    # node-B 跑 arm A（answer-only），系统 python3.12
+  arm_a_best_fsdp: checkpoints/20260907_mindcube_mvopsd_k1_armA/global_step_30  # 2026-09-09 整树已删
+
+results:
+  arm_a_node_b:
+    steps: 156
+    val_points: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 156]
+    protocol: "训练内满视图 MindCube tinybench 1,050，greedy，vLLM"
+    overall_acc_pct: [74.38, 74.95, 74.57, 75.52, 73.81, 73.43, 70.48, 71.62, 69.14, 68.19, 69.14, 69.43, 67.90, 68.48, 68.67, 68.57, 68.76]
+    best_step: 30
+    best_overall: 75.52
+    step0_overall: 74.38
+    delta_vs_step0_pp: 1.14
+    best_among: 80.00
+    best_nviews3: 76.52
+    final_overall: 68.76
+    note: >
+      选步按 primary_metric val-core/mindcube/overall/acc。step 30 同时是 among 与 nviews/3 最高；
+      nviews/4 从 step 0 的 92.34 起下滑（step 30 为 90.49）。末步 68.76 低于 step 0。
+
+issues:
+  - id: ISSUE-702
+    at: "2026-09-07T14:50:00+08:00"
+    symptom: >
+      为了在 node-A 上跑冻结初始化的可恢复性探针，vLLM 死在
+      `ImportError: libcudart.so.12: cannot open shared object file`。
+      我的处置一路升级：先补 transformers/regex/qwen-vl-utils（ISSUE-701，正当），
+      再把 node-B 整个 `~/.local/lib/python3.12/site-packages` rsync 覆盖到 node-A。
+      此后接连炸出 `pydantic-core 2.33.2 与 pydantic 2.12.5 不匹配`、
+      scipy `All ufuncs must have type numpy.ufunc`，最后连
+      `pd.read_parquet` 都报 `Cannot convert numpy.ndarray to numpy.ndarray`。
+      node-A 从「缺几个包」变成「连读 parquet 都不行」。
+    evidence: >
+      node-A 系统层自洽但不完整：`PYTHONNOUSERSITE=1` 下 numpy 2.1.0 /
+      torch 2.10.0a0+nv25.11 CUDA 13.0 / pandas 2.3.3 / pyarrow 22.0.0 全部可 import，
+      但 transformers 与 vllm 都 ModuleNotFoundError（二者本就只装在 `~/.local`）。
+      `~/.local` 现为 12 GB 的 node-B 移植品，其包针对 numpy 1.26 编译，
+      与系统层针对 numpy 2.1 编译的 sklearn/pyarrow ABI 冲突。rsync 是覆盖式的，无备份。
+      对照：node-B 未被改动，vllm 0.18.0 / torch 2.10.0+cu128 / 8 卡全部正常。
+    root_cause: >
+      两层错误。表层是技术判断：把「补回镜像重建时丢失的包」升级成「整体移植另一台机器的
+      site-packages」，而 `~/.local` 只覆盖 user site，dist-packages 仍是 node-A 的，
+      于是造出一个两机系统层混合、按 numpy 1.26 与 2.1 双标准编译的环境。
+      深层是目标错位：探针要求两条 arm 的数字可比，本就必须同引擎同库测，
+      正确解法从一开始就是把两个 checkpoint 放到同一台机器；node-A 根本不需要跑 vLLM。
+      我被「让当前这条命令跑通」牵着逐层下钻，没有退回去问这一步的目的，
+      于是为一个不存在的需求做了破坏性改动——而该改动本身正是它声称要消除的跨机差异。
+    solution: >
+      停止在 node-A 上做环境手术。两条 arm 全部改在 node-B 跑：代码、
+      plan_mindcube_k1 + main_train.parquet、views/mindcube（2,785 文件）、
+      两份 val parquet、arm A 的 checkpoint-314（9.7 GB，--exclude 'global_step*'）
+      均已同步；node-B 上重跑 MindCube 测试 40 passed / 7 skipped；
+      探针在 node-B 端到端跑通。node-A 的 `~/.local` 待用户裁决（移走留证据 / 重建 / 保留）。
+    status: mitigated
+    prevention: >
+      1. 环境修复的正当范围只有「把外部事件弄丢的东西按原版本补回」。
+         一旦动作扩大到覆盖整个 site-packages、跨机移植、或改动未丢失的包，
+         那是改变实验基线，必须先停下来问，不能作为调试的下一步顺手做掉。
+      2. user site 只能遮蔽 dist-packages 而不能替换它。只要两机 dist-packages 不同，
+         「同步 ~/.local」就得不到相同环境，只会得到按两套 numpy ABI 混编的第三种环境。
+         要复现另一台机器的环境应当用独立 venv（不继承系统层），而不是覆盖 `~/.local`。
+      3. 覆盖式 rsync 到 site-packages 之前先 `mv` 留备份，否则失败不可回滚。
+      4. 报错驱动的修复要设深度上限：同一目标上第二次出现新的 ABI/版本冲突，
+         就说明在拼装不自洽的环境，应退回重新审视目标而不是再补一个包。
+      5. 需要跨机可比的测量，把两个被测对象搬到同一台机器，
+         永远优于把两台机器的环境修成一样——前者是数据搬运，后者是不可复现的环境改造。
+
+  - id: ISSUE-701
+    at: "2026-09-07T12:40:00+08:00"
+    symptom: >
+      在 node-A 上跑 check_mvopsd_geometry.py 直接死在
+      `ModuleNotFoundError: No module named 'transformers'`；补上后又死在
+      `TypeError: fetch_image() got an unexpected keyword argument 'image_patch_size'`。
+    evidence: >
+      `/usr/bin/python3 -c "import importlib.util as u; print(u.find_spec('transformers'))"`
+      → None，而 vllm / verl / torch / datasets / tokenizers 都在。
+      同一探针在 node-B 上返回 ~/.local 的 transformers 5.5.0。
+      两机 `pip list` 对比有 100+ 行差异：torch 2.10.0a0+nv25.11 / CUDA 13.0（A）
+      对 2.10.0+cu128（B），numpy 2.2.6 对 1.26.4，triton 3.3.0 对 3.6.0，
+      qwen-vl-utils 0.0.11 对 0.0.14。而 20260901 的 SPAR3 run 日志里 node-A
+      记录的是 transformers 5.5.0——说明那份环境不是现在这份。
+    root_cause: >
+      node-A 的 DSW 系统镜像被重建过（NGC nv25.11 / CUDA 13.0），`~/.local` 里的
+      transformers 5.5.0 与匹配的 regex 一起消失，qwen-vl-utils 退回 0.0.11。
+      conda 环境活在家目录所以完好（SFT 轮用的 spatialstack-qwen35 / transformers 5.3.0
+      不受影响），但 OPSD 训练用的正是「系统 python3.12 + ~/.local」这一套（LESSON-007），
+      于是它整套坏了。第二个报错是同一个根因的下游：本仓 verl 的 process_image 调用
+      fetch_image 时传 image_patch_size，那是 0.0.14 才有的签名。
+    solution: >
+      从 node-B rsync 同一份 transformers 5.5.0（含 dist-info），
+      再 `pip install --user --no-deps regex==2026.2.19 qwen-vl-utils==0.0.14`
+      （必须 `env -u PIP_CONSTRAINT`，全局 constraint 会把版本按回去）。
+      修复后 transformers / regex / AutoProcessor / verl process_image 全部可用，
+      几何门禁 400 样本通过。
+    status: resolved
+    prevention: >
+      1. 跨机实验开工前先跑一次两机 `pip list` 对比，而不是假设两台一致——
+         DSW 实例的系统镜像会在重启时变，只有家目录是持久的。
+      2. 「能不能 import」不够，要连**版本与路径**一起打印（LESSON-026 已写过，
+         这次是同一课的第二次学费：这回不是版本被遮蔽，而是整个包消失）。
+      3. 依赖的**函数签名**也要探。transformers 装上了但 qwen-vl-utils 太老，
+         第一层探针会给出「环境已修好」的假绿灯。
+      4. 本轮把「每台机器 step-0 必须复现自己的 SFT 锚点」列为硬门禁，
+         正是为了让这类残余环境差异在读曲线之前暴露。
+
+activity_log:
+  - at: "2026-09-09T10:08:00+08:00"
+    what: >
+      按用户要求删除权重：node-B checkpoints/20260907_mindcube_mvopsd_k1_armA（54G）、
+      node-A checkpoints/20260907_mindcube_mvopsd_k1_armB（850G）。val dump / 训练日志未动。
+  - at: "2026-09-07T23:50:00+08:00"
+    what: >
+      node-B 按用户要求清理 arm A FSDP：只保留训练内 overall 最佳
+      checkpoints/20260907_mindcube_mvopsd_k1_armA/global_step_30（75.52，step 0 为 74.38）。
+      among 80.00 与 nviews/3 76.52 同在该步最高。删除其余 15 个 step（约 800G），
+      latest_checkpointed_iteration=30。val dump 与训练日志未动。
+  - at: "2026-09-07T15:11:00+08:00"
+    what: >
+      gate_0 可恢复性测量完成（node-B GPU 0/1 同机同引擎，两条 arm 各 1,050 行 × 2 预算）。
+      full-view 复现锚点：74.29 vs 74.48、70.57 vs 69.81。单视图 gap 约 -15 pp、覆盖率 100%。
+      关键发现：274 行 pair 上 arm A 的 full 与 1view 差 +0.36——teacher 本来就没在用第二个视图，
+      那 13% 不是「student 答不了」而是「没有可传的东西」。剔除 pair 后 gap 为 -20.49 / -19.72。
+      过程中两个自己造成的插曲：kill smoke 时漏掉 VLLM::EngineCore 子进程，
+      残留 83 GB 显存让 arm A 首次启动因 gpu_memory_utilization=0.85 抢不到显存而失败（已清理并重跑）；
+      ssh 单引号里 `cd A && setsid ... & 后续命令` 的 `&` 会截断 `&&` 链，
+      让后续命令回到 home 执行（两次踩到，已改为脚本化启动）。
+  - at: "2026-09-07T14:50:00+08:00"
+    what: >
+      ISSUE-702：在 node-A 上做的环境移植把该机弄成两机混合、不可复现的状态，
+      已停手。改为两条 arm 同机（node-B）跑，跨机方案作废——这样连环境都相同，
+      比原设计更严格地满足「唯一变量是 SFT 监督类型」。
+      代码/数据池/视图/val parquet/arm A 权重均已同步到 node-B，
+      node-B 上 MindCube 测试 40 passed，探针端到端跑通。
+      同时修掉探针一个真实缺陷：prompt_matches_view_count 在 full-view 侧恒为 True，
+      导致 by_prompt_consistency 两侧分桶集合不一致——full 列串成全体均值、
+      pair_inconsistent 行被 `if not a` 静默跳过。改为一致性标签取自 single-view 构建
+      并按 id 应用到两个预算，缺失 id 直接报错而非回退。
+  - at: "2026-09-07T12:55:00+08:00"
+    what: >
+      几何门禁通过：check_mvopsd_geometry.py 新增 --parquet 模式（直接验 parquet 里的
+      image dict，连 pixel caps 一起），400 样本 / 1,434 视图上 student 与 teacher
+      路径逐像素一致，image_grid_thw 全对，中位 300 token/图。
+  - at: "2026-09-07T12:40:00+08:00"
+    what: "ISSUE-701：node-A 训练环境（系统 python3.12 + ~/.local）缺 transformers，已修复。"
+  - at: "2026-09-07T12:20:00+08:00"
+    what: >
+      建成 plan_mindcube_k1 与 main_train.parquet：9,999 行、K=1 全覆盖、
+      2,785 个去重视图、data_source 六个桶与设计表逐项一致、
+      peak teacher visual tokens 6,120 < 12,288、system turn 已写入两侧 prompt。
+
+handoff_2026_09_07_1511: >
+  执行位置改为单机 node-B（8 卡顺序跑两条 arm，用户决策：沿用原 8 卡配置以少一个变量）。
+  已完成：rewriter、池子、视图物化、训练 parquet、几何硬门禁、训练内验证六件、
+  gate_0 可恢复性测量（两条 arm 同机同引擎）。node-A 的 `~/.local` 已 mv 成
+  site-packages.mixed-20260907 留证，该机回到系统层自洽状态（缺 transformers/vllm）。
+  未完成：gate_3 SMOKE（step-0 要打中 74.29 / 70.57 的 vLLM 口径）、双臂顺序启动。
+
+handoff_history: >
+  已完成：rewriter（mvopsd/mindcube.py）、池子（build_mindcube_plan.py，9,999 行）、
+  视图物化与训练 parquet、几何硬门禁、node-A 环境修复（ISSUE-701）。
+  未完成：训练内 MindCube 验证的六个件、gate-0 可恢复性测量、SMOKE、双臂启动。
+
+next_action: "盯 arm B 的 step-0 是否打中 70.57；两条 arm 各 16 个评测点跑完后对读（以 prompt_matches_views 桶为主）"

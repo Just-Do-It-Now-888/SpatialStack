@@ -17,4 +17,5 @@ When working on training, evaluation, inference, OPSD, checkpoints, datasets, or
 8. Before handoff or completion, update `handoff`, `activity_log`, phase status, metrics, conclusion, and next action.
 9. Never put secrets, model weights, datasets, caches, or full logs in `experiments/`.
 10. Do not launch a duplicate job when shared state is unclear; inspect actual processes and artifacts first.
+11. All training from 2026-09-10 onward must run in conda `sr_opsd` (LESSON-041). Do not launch SFT or MV-OPSD in `spatialstack-qwen35`, `vision-opd`, or system python + `~/.local`. Evaluation may still use another env when the registry records it. Override only with `ALLOW_NON_SROPSD=1` and an issues note.
 

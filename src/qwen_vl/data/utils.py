@@ -154,19 +154,37 @@ def load_and_preprocess_images(image_path_list, mode="crop", target_size=518):
     return images
 
 
-def prepare_image_inputs(image, image_processor, model_type="qwen2.5vl"):
-    images = load_and_preprocess_images([image])
-    merge_size: int = getattr(image_processor, "merge_size")
-    patch_size: int = getattr(image_processor, "patch_size")
-    _, height, width = images[0].shape
+def prepare_image_inputs(
+    image, image_processor, model_type="qwen2.5vl", use_vggt_preprocess=True
+):
+    """Turn one image into visual tokens plus optional geometry-encoder input.
 
-    if width % (patch_size * merge_size) > 0:
-        width = width - (width % (patch_size * merge_size))
-    if height % (patch_size * merge_size) > 0:
-        height = height - (height % (patch_size * merge_size))
+    With ``use_vggt_preprocess`` the image first goes through VGGT's loader,
+    whose "crop" mode fixes the width at 518 px and *centre-crops the height*.
+    That never fires on the landscape imagery this repo was built around (a 4:3
+    source lands at 518x392), but it discards about a quarter of the height of a
+    portrait image. Set the flag to False to hand the image straight to the Qwen
+    processor instead, which is also what the eval path does; the ``max_pixels``
+    and ``min_pixels`` on ``image_processor`` then become live.
+    """
+    if use_vggt_preprocess:
+        images = load_and_preprocess_images([image])
+        merge_size: int = getattr(image_processor, "merge_size")
+        patch_size: int = getattr(image_processor, "patch_size")
+        _, height, width = images[0].shape
 
-    images = images[:,:, :height, :width]
-    visual_processed = image_processor(images, return_tensors="pt", do_rescale=False)
+        if width % (patch_size * merge_size) > 0:
+            width = width - (width % (patch_size * merge_size))
+        if height % (patch_size * merge_size) > 0:
+            height = height - (height % (patch_size * merge_size))
+
+        images = images[:,:, :height, :width]
+        visual_processed = image_processor(images, return_tensors="pt", do_rescale=False)
+    else:
+        # A PIL image is still uint8 here, so rescaling must stay enabled.
+        images = [_load_rgb_image(image)]
+        visual_processed = image_processor(images, return_tensors="pt")
+
     image_tensor = visual_processed["pixel_values"]
     grid_thw = visual_processed["image_grid_thw"]
 
@@ -177,8 +195,11 @@ def prepare_image_inputs(image, image_processor, model_type="qwen2.5vl"):
         geometry_height = grid_h * GEOMETRY_ENCODER_PATCH_SIZE
         geometry_image = rgb_image.resize((geometry_width, geometry_height), Image.Resampling.BICUBIC)
         geometry_encoder_inputs = TF.ToTensor()(geometry_image)
-    else:
+    elif use_vggt_preprocess:
         geometry_encoder_inputs = copy.deepcopy(images[0])
+    else:
+        # Without the VGGT pass `images` holds PIL images, not tensors.
+        geometry_encoder_inputs = TF.ToTensor()(images[0])
 
     return {
         "pixel_values": image_tensor,

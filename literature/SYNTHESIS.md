@@ -4,7 +4,9 @@
 
 ## 问题定义与研究目标
 
-当前十三条 OPD 路线都试图把“训练时可用、部署时不可得或代价较高的条件”内化到 VLM 的标准推理策略：
+当前十四条 OPD 路线都试图把“训练时可用、部署时不可得或代价较高的条件”内化到学生的标准推理策略：
+
+- [OPSD](papers/opsd.md)（E-001、E-002）是文本侧源头：同一 LLM，学生只看题目，教师额外看 ground-truth solution，在学生 on-policy 轨迹上做 token 级 JSD。
 
 - [VOLD](papers/vold.md)（E-001、E-002）用更强文本 LLM 的推理分布，提升 VLM 共享语言解码器的推理能力。
 - [Vision-OPD](papers/vision-opd.md)（E-001、E-002）用同一 MLLM 在证据裁剪视图下的优势，提升其带框全图条件下的细粒度感知。
@@ -26,6 +28,7 @@
 
 ### 按教师来源
 
+- **同模型答案特权教师：** OPSD 的 teacher/student 共享同一 LLM；教师额外读取 reference solution，学生不读，非答案输入相同。
 - **跨模型能力教师：** VOLD 的教师为固定 Qwen3-8B，学生为 Qwen2.5-VL-3B；先通过同教师轨迹 SFT 缩小策略差距。
 - **同模型特权条件教师：** Vision-OPD 的 teacher/student 从同一 Qwen3.5 checkpoint 出发，分别看 crop 与全图；通过 frozen/EMA target 保持教师稳定。
 - **跨规模视觉教师：** VA-OPD 使用 Qwen3-VL-4B/8B/32B 教师指导 2B 学生，并额外用退化图 teacher pass 估计 token 视觉依赖。
@@ -42,6 +45,7 @@
 
 ### 按特权信息
 
+- **答案/题解特权：** OPSD 的教师看到 ground-truth solution，学生只看到问题；两边非答案 token 相同。
 - **语言推理特权：** VOLD 的教师规模更大、文本推理能力更强。
 - **视觉证据特权：** Vision-OPD 的教师看到隔离且放大 2 倍的 evidence-centered crop。
 - **视觉反事实特权：** VA-OPD 的教师同时比较原图与细节退化图，从预测差异中提供视觉依赖度，而原图 teacher distribution 仍作为 KL target。
@@ -74,6 +78,7 @@
 
 ## 数据构造与监督信号
 
+- OPSD 使用数学题的 reference solution 作为教师上下文，学生 prompt 不含该 solution；蒸馏在学生 on-policy completion 上进行（[OPSD](papers/opsd.md)，E-001、E-002）。公开评测为 AIME/HMMT，不是空间多视图。
 - VOLD 使用大规模纯文本推理 prompt/轨迹：约 350K MoT 教师轨迹用于 SFT，orz-57k 数学题及 exact-match answer 用于 RL。监督同时包含序列级二值 reward 和外部教师 token 分布（[VOLD](papers/vold.md)，E-001、E-003）。
 - Vision-OPD 使用 6.2K 个全图—crop—问题三元组。主方法不消费答案标签，但依赖对象检测/分割区域、bounding box、crop，以及 Qwen3.5-397B 生成问题（[Vision-OPD](papers/vision-opd.md)，E-003、E-010）。
 - VA-OPD 使用 Geometry3K/ViRL39K 图文数学题，不需要额外标注或 reward；监督由视觉教师的原图 KL target 与原图/退化图反事实 VA 共同构成（[VA-OPD](papers/va-opd.md)，E-001、E-004）。
@@ -230,7 +235,7 @@
 9. 同时使用 correctness 与 spatial advantage 双轴门控：保护已正确的新路径，强化真正依赖空间证据的 token；并直接测 student 在原始/反事实输入下的 log-prob 差，避免只用 teacher proxy 证明 grounding。
 10. 增加 gradient-level 诊断：分别计算 language、spatial target 与 outcome objective 的梯度 norm/cosine；比较 token weighting、gradient steering、PCGrad/投影和 Pareto weighting。
 11. 构造 spatial target 时明确 stop-gradient：若 target 含 student text-only prior，必须对其梯度路径做单元测试与消融；同时保持 steered gradient norm，避免混淆方向和 learning-rate 效应。
-12. 建立 privilege provenance 规范：记录 cue/crop/对象图的生成器、可见字段、是否访问答案、随机性和过滤规则，并自动扫描答案、定理、真值坐标及 teacher-only 标签泄漏。
+12. 建立 privilege provenance 规范：记录 cue/crop/对象图的生成器、可见字段、是否访问答案、随机性和过滤规则，并自动扫描答案、定理、真值坐标及 teacher-only 标签泄漏。等视图 Answer-OPSD 必须把答案特权与 N/K 视图特权分成两臂，并扫描 Hint/GT 复述。
 13. 若使用 recovery token，应让 query 在因果路径上真正读取当前问题；比较前置固定 sink、question 后 sink、question-summary query 与等参数 pooling baseline。
 14. 把空间 rollout 拆成结构化 observation→relation inference→plan/action，并按阶段限制 teacher 可见字段；感知/观测 teacher 不应访问最终答案、真值路径或动作标签。
 15. 对所有 routing 分支记录样本率、token 数、loss 和梯度占比；invalid-format fallback 优先使用无答案 grammar teacher，避免 full privileged teacher 在训练早期重新监督整条轨迹。
@@ -272,7 +277,7 @@
 - **S-009：高视觉依赖 token 上语言与视觉梯度可能近乎正交或冲突。** 证据：[VGS E-002、E-004](papers/vgs.md#e-002)。
 - **S-010：视觉 grounding 干预可分为“监督位置选择”与“梯度方向 steering”。** 证据：[VA-OPD E-004](papers/va-opd.md#e-004)、[VGS E-003](papers/vgs.md#e-003)。
 - **S-011：视觉 steering 可与 outcome RL 联合，但逐项收益并非始终单调。** 证据：[VGS E-007、E-012](papers/vgs.md#e-007)；[VOLD E-003](papers/vold.md#e-003)。
-- **S-012：Privilege 设计会影响 OPD 的部署匹配与 shortcut leakage。** 证据：[ViCuR E-001、E-004、E-008](papers/vicur.md#e-001)；[Vision-OPD E-010](papers/vision-opd.md#e-010)。
+- **S-012：Privilege 设计会影响 OPD 的部署匹配与 shortcut leakage。** 证据：[OPSD E-002、E-006](papers/opsd.md#e-002)；[ViCuR E-001、E-004、E-008](papers/vicur.md#e-001)；[Vision-OPD E-010](papers/vision-opd.md#e-010)。
 - **S-013：视觉 cue 本身的贡献通常大于额外 recovery architecture。** 证据：[ViCuR E-006](papers/vicur.md#e-006)。
 - **S-014：Recoverable privilege 是条件性结论，依赖 cue provenance。** 论文结论：[ViCuR E-001](papers/vicur.md#e-001)；核对项：[ViCuR E-009](papers/vicur.md#e-009)。
 - **S-015：限制答案 privilege 的介入阶段可改善先验冲突下的视觉依赖。** 证据：[ViGOS E-003、E-005](papers/vigos.md#e-003)。

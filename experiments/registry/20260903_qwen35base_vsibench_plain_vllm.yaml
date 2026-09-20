@@ -1,0 +1,97 @@
+experiment_id: 20260903_qwen35base_vsibench_plain_vllm
+title: "基座 VSI-Bench original prompt，vLLM 离线 greedy 1024"
+status: completed
+completed_at: "2026-09-03T18:47:00+08:00"
+
+created_at: "2026-09-03T17:51:00+08:00"
+owner: cursor-window-mvopsd
+node: node-B
+
+goal: >
+  用户要求用 vLLM 对基座做 original 协议离线评测。
+  题面与 20260902 HF spatialstack_plain 相同（无 boxed 后缀），
+  greedy 1024，answer_tail，不开 boxed-primary、不开 judge。
+
+protocol:
+  launcher: scripts/opsd/run_vsibench_plain_vllm_base.sh
+  python: conda sr_opsd
+  harness: scripts/opsd/tools/eval_vsibench_vllm.py
+  VSIBENCH_PROTOCOL: spatialstack_plain
+  prompt_suffix: ""
+  boxed_primary: false
+  decoding: greedy
+  max_new_tokens: 1024
+  max_model_len: 16384
+  frames: 32
+  enable_thinking: false
+  tensor_parallel_size: 8
+
+arms:
+  base:
+    model: models/Qwen3.5-4B
+    output_root: logs/eval/20260903_qwen35base_vsibench_plain_vllm
+    status: done
+    wrapper_pid: 3041747
+    log: logs/eval/20260903_qwen35base_vsibench_plain_vllm/run.log
+    summary: logs/eval/20260903_qwen35base_vsibench_plain_vllm/summary.json
+    overall: 52.47
+    answered_frac: 98.50
+    wall_minutes: 17.4
+    q_per_s: 4.92
+    n_samples: 5130
+    by_question_type:
+      object_counting: 56.65
+      object_abs_distance: 36.62
+      object_size_estimation: 67.43
+      room_size_estimation: 54.90
+      object_rel_distance: 57.46
+      object_rel_direction_easy: 60.37
+      object_rel_direction_medium: 53.70
+      object_rel_direction_hard: 44.77
+      route_planning: 34.02
+      obj_appearance_order: 59.71
+
+results:
+  overall: 52.47
+  answered_pct: 98.50
+  vs_hf_original_52_75: -0.28
+  vs_historical_vllm_52_58: -0.11
+  reading: >
+    5130 题，17.4 分钟。同协议 HF 52.75 差 −0.28，属引擎差而非协议差。
+    相对历史 vLLM 52.58 为 −0.11，主要是现行末行抽取。不可写成 48.06。
+
+issues:
+  - id: ISSUE-001
+    at: "2026-09-03T17:56:17+08:00"
+    symptom: "全 scene SKIP，无 summary.json，KeyError question_type"
+    evidence: "run.log: No module named 'decord'；0 条生成后 vsibench_aggregate_results groupby 失败"
+    root_cause: >
+      启动器用 /usr/bin/python3 + ~/.local 的 vllm 0.18.0，该环境没有 decord。
+      conda sr_opsd 同时有 vllm 0.18.0 与 decord 0.6.0。
+    solution: "改用 conda sr_opsd；run_eval 在 0 条时直接退出"
+    status: resolved
+    prevention: "vLLM VSI 评测启动前 import vllm 与 decord"
+
+comparability:
+  do_not_mix:
+    - "HF/lmms-eval original 52.75"
+    - "历史 vLLM 52.58（当时抽取）"
+    - "boxed last-line 48.06"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-03T21:10:00+08:00"
+  current_task: "vLLM original 完成：52.47 / 作答 98.50%"
+  owner: cursor-window-mvopsd
+  resources: ""
+  next_action: "对外 original 口径 HF 写 52.75、vLLM 写 52.47；两引擎不可混成一个基座数字"
+
+activity_log:
+  - at: "2026-09-03T17:51:00+08:00"
+    what: "启动 vLLM original；系统 python + vllm 0.18.0"
+  - at: "2026-09-03T17:56:17+08:00"
+    what: "失败 ISSUE-001：无 decord，0 条"
+  - at: "2026-09-03T18:27:00+08:00"
+    what: "改 conda sr_opsd 重跑"
+  - at: "2026-09-03T18:47:00+08:00"
+    what: "完成 overall 52.47；8 卡已释放"

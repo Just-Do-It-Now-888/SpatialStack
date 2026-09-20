@@ -1,0 +1,182 @@
+experiment_id: 20260919_spatialstack_answer_opsd_spar_fullviews
+title: "SPAR equal-view Answer-OPSD: full album both sides, teacher gets GT answer"
+status: running
+
+created_at: "2026-09-19T16:35:00+08:00"
+started_at: "2026-09-19T16:42:45+08:00"
+driver_pid: 2890470
+train_pgid: 2890470
+python_pid: 2890519
+train_log: logs/train/20260919_spatialstack_answer_opsd_spar_fullviews/train_20260919_164245.log
+owner: cursor-window-spatialstack
+
+goal: >
+  在 SpatialStack geo 权重上跑 SPAR 全量（spar_3view + spar_32view）1 epoch
+  Answer-OPSD。Student 与 Teacher 都看完整相册（32/32 与 3/3），只给 Teacher
+  拼接 ground-truth 答案（teacher_prompt_mode=answer_hint）。对照轴是
+  20260918 SPAR T32/S16 的视图特权，而不是再叠一层 N>K。
+
+hypothesis: >
+  原版 OPSD 的答案特权在等视图空间数据上能提供稳定 teacher target。
+  SPAR GT 多为短段落/选项，特权弱于 AIME 题解；需同时看 in-loop VSI
+  与 Hint/GT 泄漏，不能只看 vopd_loss 下降。
+
+relations:
+  init_from: 20260909_spatialstack_qwen35_geo
+  follows:
+    - 20260918_spatialstack_mvopsd_spar_t32_s16
+  method_paper: literature/papers/opsd.md
+  contrast: "T32/S16 = view-count privilege, no answer; this arm = answer privilege, N=K"
+
+code:
+  git_commit: b6eeb00
+  git_dirty: true
+
+environment:
+  conda_env: sr_opsd
+  nodes: [node-A]
+  gpus_per_node: 8
+  gpu_type: H20
+
+model:
+  backbone: Qwen3.5-4B + VGGT geometry fusion
+  model_path: output/spatialstack_qwen35_train
+  geometry_encoder: VGGT-1B
+  geometry_encoder_path: models/VGGT-1B
+  teacher: frozen
+  thinking: false
+  teacher_prompt_mode: answer_hint
+
+design:
+  data_sources: [spar_3view, spar_32view]
+  view_budget:
+    spar_32view:
+      teacher: 32
+      student: 32
+      student_rule: full album, original Frame-N, no subset
+    spar_3view:
+      teacher: 3
+      student: 3
+      note: "N/K=1; only added privilege is the teacher answer hint"
+  privilege: "answer_hint on teacher; student prompt has no GT"
+  answer_note: >
+    SPAR ground_truth is often a short paragraph or option, not an AIME-style
+    full solution. Template is the existing answer_hint_template.
+  parquet: data/mvopsd/parquet_answer_opsd_spar_fullviews/main_train.parquet
+  plan: data/mvopsd/plan_answer_opsd_spar_fullviews
+  train_rows: 54495
+  holdout_rows: 1000
+  train_by_source: {spar_3view: 33970, spar_32view: 20525}
+  total_steps: 1135
+  epochs: 1.0
+  train_batch_size: 48
+  test_freq: 50
+  save_freq: 50
+  max_prompt_length: 12288
+  max_actor_ckpt_to_keep: 3
+  ckpt_keep_mode: best
+  ckpt_keep_metric: val-core/vsibench/overall/acc
+  shared_protocol:
+    - "ROLLOUT_NAME=hf"
+    - "lr 2e-6 / batch 48 / rollout.n=1 / frozen teacher"
+    - "teacher_prompt_mode=answer_hint"
+    - "teacher_enable_thinking=False"
+    - "fallback_to_policy_loss_on_missing_teacher=False"
+    - "data.max_prompt_length=12288 (SPAR 32-view student)"
+    - "VAL_FILE=vsibench_val_boxed_lastline_sub480.parquet"
+    - "VAL_DO_SAMPLE=0 greedy"
+    - "JUDGE=0"
+    - "WANDB_MODE=online project=MV-OPSD"
+    - "do not change mvopsd.yaml default teacher_prompt_mode=null"
+
+wandb:
+  mode: online
+  project: MV-OPSD
+  run_name: 20260919_spatialstack_answer_opsd_spar_fullviews
+  url: ""
+  run_id: ""
+
+read_rules:
+  - "只相对本臂 greedy step 0 与 20260918 T32/S16 greedy in-loop"
+  - "不可与 geo boxed 66.59 并列"
+  - "泄漏率与准确率必须一起报"
+
+training:
+  status: running
+  entrypoint: scripts/opsd/run_answer_opsd.sh
+  command: |
+    SMOKE=1 bash scripts/opsd/run_answer_opsd.sh
+    setsid nohup bash scripts/opsd/run_answer_opsd.sh
+      > logs/train/20260919_spatialstack_answer_opsd_spar_fullviews/train.nohup.log 2>&1
+  parameters:
+    seed: 20260919
+    learning_rate: 2.0e-6
+    total_batch_size: 48
+    epochs: 1.0
+    teacher_prompt_mode: answer_hint
+  artifacts:
+    output_dir: checkpoints/20260919_spatialstack_answer_opsd_spar_fullviews
+    train_log: logs/train/20260919_spatialstack_answer_opsd_spar_fullviews/train_20260919_164245.log
+    smoke_log: logs/train/20260919_spatialstack_answer_opsd_spar_fullviews_smoke/train_20260919_163607.log
+  results:
+    metrics:
+      smoke_global_step: 2
+      smoke_val_smoke8_acc_step0: 0.6417
+      smoke_val_smoke8_acc_step2: 0.6542
+      smoke_policy_fallback_fraction: 0.0
+      smoke_opsd_answer_hint_fraction: 1.0
+      smoke_vopd_loss: 0.00381
+      smoke_global_seqlen_max: 6532
+      smoke_hint_pattern: 0
+      smoke_exact_gt_copy: 1
+    summary: >
+      SMOKE 两步通过。answer_hint_fraction=1.0，fallback=0，vopd_loss≈0.00381，
+      smoke8 acc 0.6417→0.6542。seqlen max 6532 < 12288。wandb teardown BrokenPipe
+      与 T32/S16 相同，忽略。泄漏扫描：Hint 模板 0/16；exact GT 1/16 是正确短答
+      curtain(Object2)，不是 reference-solution 抄写。
+    failure_reason: ""
+
+evaluation:
+  status: not_started
+  benchmarks: [vsibench_inloop_sub480]
+  parameters:
+    in_loop: vsibench_val_boxed_lastline_sub480.parquet greedy
+    protocol: lastline
+    conda_env: sr_opsd
+    leakage_scan: scripts/opsd/tools/scan_answer_leakage.py
+  artifacts:
+    eval_root: logs/eval/20260919_spatialstack_answer_opsd_spar_fullviews
+  results:
+    metrics: {}
+    summary: ""
+    failure_reason: ""
+
+handoff:
+  current_phase: training
+  last_updated: "2026-09-19T16:45:00+08:00"
+  current_task: "formal 1135-step Answer-OPSD on node-A"
+  owner: cursor-window-spatialstack
+  active_job_id: "2890470"
+  resources: "node-A 8×H20; PID 2890470 / python 2890519; do not use node-C"
+  blocker: ""
+  next_action: "watch opsd_answer_hint_fraction=1, fallback=0, in-loop VSI, Hint scan on rollouts"
+
+issues: []
+
+activity_log:
+  - at: "2026-09-19T16:35:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "plan builder + parquet N=K + answer_hint guards; registry created"
+    result: "54495 train / 1000 holdout; mean N/K=1.00; max visual tokens 6144"
+  - at: "2026-09-19T16:36:07+08:00"
+    actor: cursor-window-spatialstack
+    action: "SMOKE=1 two steps sr_opsd node-A"
+    result: "gates passed; hint_fraction 1.0; fallback 0; vopd_loss 0.00381; smoke8 64.17→65.42"
+  - at: "2026-09-19T16:42:45+08:00"
+    actor: cursor-window-spatialstack
+    action: "formal 1135-step WANDB online ckpt_keep_mode=best"
+    result: "PID 2890470 PGID 2890470 python 2890519"
+
+notes:
+  conclusion: ""
+  next_step: "in-loop VSI every 50; scan rollouts for Hint/GT copy after dumps appear"

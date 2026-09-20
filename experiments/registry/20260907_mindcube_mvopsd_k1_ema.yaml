@@ -1,0 +1,111 @@
+experiment_id: 20260907_mindcube_mvopsd_k1_ema
+title: "MindCube MV-OPSD K=1 EMA teacher：相对 frozen 轮唯一变量是 teacher 是否跟随 student"
+status: completed  # weights deleted 2026-09-09; logs retained
+
+created_at: "2026-09-07T20:05:00+08:00"
+started_at: "2026-09-07T20:17:00+08:00"
+owner: "cursor-window-mindcube-opsd"
+
+goal: >
+  在与 20260907_mindcube_mvopsd_k1 完全相同的池子、初始化、步数口径上，
+  把 teacher 从 frozen 换成 Vision-OPD 同式 EMA（rate 0.05）。
+  对照对象是刚结束的 frozen K=1，不是基座。
+
+hypothesis: >
+  frozen 轮全视图 tinybench 两条都掉了（A 74.38→68.76，B 71.81→68.38）。
+  一个机制解释是：student 在 K=1 上被拉向一份不再更新的满视图后验，
+  多视图能力被冲掉，teacher 又不会跟着修好。EMA 让 teacher 缓步跟随 student，
+  特权轴仍在（teacher 看全部 N 视图），但目标分布会动。
+  反面假设同样具体：v0 的 EMA 从基座起跑把 teacher 带进 170 词散文（LESSON-009）；
+  本轮从 SFT-314 起跑、每 10 步评测，若 step 10 输出长度爆炸或 overall 再掉一截，
+  按 LESSON-009 停，不要训满。
+
+relations:
+  nested_on: 20260907_mindcube_mvopsd_k1
+  single_variable: "teacher_regularization frozen -> ema(0.05)"
+  vision_opd_ref: "https://github.com/VisionOPD/Vision-OPD.git teacher_update_rate=0.05"
+
+design:
+  privilege_axis: view_subset
+  teacher_views: "全部 N（2/3/4）"
+  k_views_student: 1
+  teacher_regularization: ema
+  teacher_update_rate: 0.05
+  init_arm_a: output/20260906_qwen35_mindcube_sft_answeronly/checkpoint-314
+  init_arm_b: output/20260906_qwen35_mindcube_sft_cot/checkpoint-314
+  train_file: data/mvopsd/parquet_mindcube_k1/main_train.parquet
+  train_rows: 9999
+  val_file: data/eval/mindcube_verl/mindcube_val.parquet
+
+launch_plan:
+  total_steps: 156
+  total_epochs: 1
+  test_freq: 10
+  save_freq: 10
+  rollout_n: 1
+  teacher: ema
+  teacher_update_rate: 0.05
+  judge: 0
+  val_decoding: greedy
+  wandb: online
+  assignment:
+    arm_a: {node: node-A, env: "conda vision-opd", gpus: 8}
+    arm_b: {node: node-B, env: "系统 python3.12 + ~/.local", gpus: 8}
+
+reading_discipline:
+  - "对照是 frozen K=1 同初始化，不是基座 46.86。"
+  - "vopd_loss 下降在 EMA 下几乎必然发生，不能当成功（LESSON-012）。"
+  - "self_distillation/teacher_probe 必须跨步漂移；恒定说明还在走 frozen。"
+  - "arm A resp_tokens/median 应约 11，arm B 约 319；step 10 若爆炸，停。"
+  - "以 val-core/mindcube/overall/acc 自比 step-0，并看 family / nviews。"
+
+primary_metric: "val-core/mindcube/overall/acc 走势（自比 step 0），对照 frozen 轮同 step"
+
+gates:
+  - id: gate_smoke_ema
+    kind: "硬门禁"
+    what: >
+      SMOKE=1 在 node-A arm A：step-0 打中 74.29 ± 噪声；
+      teacher_image_swap_fraction=1.0；policy_fallback_fraction=0；
+      teacher_probe 在 step 1 与 step 2 **必须不同**。
+    result: >
+      PASS（arm A，2026-09-07 20:16，node-A，conda vision-opd，2 步 / batch 8）。
+      日志 logs/train/smoke_ema_armA_driver.log。
+    result_detail:
+      step0_overall_acc: 74.38
+      step1_overall_acc: 74.57
+      step2_overall_acc: 74.19
+      resp_tokens_median: 11
+      teacher_image_swap_fraction: 1.0
+      policy_fallback_fraction: 0.0
+      teacher_probe_step1: 0.04456362104974687
+      teacher_probe_step2: 0.04456367529928684   # 与 step1 不同 = EMA 在动
+      vopd_loss: {step1: 0.01034, step2: 0.02330}
+
+artifacts:
+  train_parquet: data/mvopsd/parquet_mindcube_k1/main_train.parquet
+  val_parquet_fullview: data/eval/mindcube_verl/mindcube_val.parquet
+  ckpt_arm_a: checkpoints/20260907_mindcube_mvopsd_k1_ema_armA/  # 2026-09-09 已删
+  ckpt_arm_b: checkpoints/20260907_mindcube_mvopsd_k1_ema_armB/  # 2026-09-09 已删
+  logs_arm_a: logs/train/ema_armA_driver.log
+  logs_arm_b: logs/train/ema_armB_driver.log
+
+issues: []
+
+activity_log:
+  - at: "2026-09-09T10:08:00+08:00"
+    what: >
+      按用户要求删除两机 EMA 权重：node-A ..._ema_armA（850G）、node-B ..._ema_armB（213G）。
+      driver 日志未动。
+  - at: "2026-09-07T20:17:00+08:00"
+    what: >
+      双机正式启动。node-A arm A（answer-only SFT-314，vision-opd），
+      node-B arm B（CoT SFT-314，系统 python）。hydra 覆盖
+      teacher_regularization=ema teacher_update_rate=0.05，WANDB_MODE=online，
+      156 步，checkpoint 目录带 _ema_ 前缀。SMOKE 已过：teacher_probe 跨步漂移。
+
+handoff: >
+  待 SMOKE 过门禁后双机启动。不要覆盖 frozen 轮
+  checkpoints/20260907_mindcube_mvopsd_k1_arm{A,B}/。
+
+next_action: "盯两条 arm 的 step-0 与 teacher_probe 漂移；step 10 看输出长度是否爆炸"

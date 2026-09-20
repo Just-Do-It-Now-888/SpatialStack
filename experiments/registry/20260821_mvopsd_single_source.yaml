@@ -1,0 +1,675 @@
+experiment_id: 20260821_mvopsd_single_source
+title: "MV-OPSD 单数据集训练：teacher<=8 视角、K~U{2,3,4,5}、rollout n=1、lr 2e-6"
+status: cancelled  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-21T16:10:00+08:00"
+finished_at: "2026-08-21T23:40:00+08:00"
+owner: "cursor-window-mvopsd"
+
+goal: >
+  前六轮（v1、rollout8、lr/batch 四条、view_ratio 两条）全部在混合池上训练，而 2026-08-20
+  的 teacher 可靠性全量评测把这个池拆开后发现：同一个 teacher 在 llava_hound 上 57.7%、
+  在 spar_32view 上 19.9%，题型层面从 57.7% 到 1.3%，相差 40 倍以上
+  （20260820_teacher_reliability，报告 2.2/2.3 节）。
+  混合池上的每一条曲线都是这些差异极大的监督信号的加权和，而权重是数据量决定的、
+  没有人选过。本轮按用户与老师 2026-08-21 的决策，改成**一次只训一个数据集**，
+  让「方法在什么质量的监督下成立」变成可读的量。
+
+hypothesis: >
+  可检验的表述：若 vopd 自蒸馏的效果由 teacher 后验的正确性决定，那么四条 arm 的
+  VSI-Bench 曲线应当按 teacher 可靠性排序（llava_hound 57.7% > vsi_appr_order 55.3%
+  > vlm3r_scannet 44.0% > spar_32view 19.9%）。
+  若四条 arm 表现一致（都损伤、或都不动），则「监督质量」不是主要变量，
+  应转向 LESSON-016/020 指向的另一条解释：损失被与视角无关的散文 token 稀释，
+  梯度主要在改写作风格而不在空间能力。
+  注意这不是一个「哪个数据集最好」的排名任务——四条 arm 的池大小、题型结构、
+  金标形式都不同，**只有「排序是否与可靠性一致」这一条是可读的**。
+
+grouping_rationale: >
+  四条 arm 共享同一套配置（除训练池）、同一假设、同一判读标准，合并在一个 registry 里。
+  每条 arm 有独立 experiment_name 与产物路径。
+
+step_budget_rule: >
+  **步数按「过一遍数据集」定，不套用固定值**（用户 2026-08-21 16:30 决策）。
+  每条 arm 的步数 = floor(训练行数 / 64)，即恰好 1 个 epoch：
+
+    llava_hound_64k   37,509 / 64 = 586.08 -> 586 步（余 5 行）
+    vlm3r_scannet     30,567 / 64 = 477.61 -> 477 步（余 39 行）
+    vsi_appr_order     1,735 / 64 =  27.11 ->  27 步（余 7 行）
+    spar_32view       视最终池而定：全截 21,025 -> 328；只留不点名帧 8,974 -> 140；
+                      全截并摘掉 imagination_oo 15,155 -> 236
+
+  这样四条 arm 的「每条样本被看过的次数」相同（1 次），而之前统一 300 步会让
+  llava_hound 只过 0.51 个 epoch、vsi_appr_order 过 13 个 epoch——
+  同一个横轴上并列的两条曲线其实在测完全不同的东西。
+  **代价**：横轴不再对齐，586 步的 arm 与 477 步的 arm 在同一步数上已经过了
+  不同比例的数据。读图时要按 epoch 比例（step/total）而不是按绝对步数对齐。
+
+wall_clock_budget: >
+  实测分量（2026-08-21，来自 khalf_pipecheck 与 khalf_main）：
+
+    全量 VSI-Bench 评测（5,130 题）  1758 / 1762 / 1776 s -> 29.5 min，三次极稳
+    存 checkpoint                    12 s，可忽略
+    单步（rollout.n=4，256 序列/步）  125 s = update_actor 69 + adv 32 + gen 24
+    单步（rollout.n=1，64 序列/步）   预计 35-50 s，本轮首个实测待 step 1 落盘后补
+
+  按 40 s/步估：25 步 = 17 min 训练 + 29.5 min 评测，约 45-50 min 一个周期。
+  llava_hound 586 步 ~18 h（训练 6.5 h / 评测 11.8 h）；vlm3r 477 步 ~15 h。
+
+  **评测占约 65% 墙钟**，与前六轮的 3% 完全不同。原因是两件事叠加：
+  评测集从 CV-Bench 2,638 题（2.8 min）换成全量 VSI-Bench 5,130 题（29.5 min，贵 10 倍），
+  同时 rollout.n=1 让训练步便宜 2.5 倍。29.5 min 不随 rollout.n 变化——
+  评测恒为 greedy、val_kwargs.n=1——所以这个比例不会自己好转。
+  用户 2026-08-21 16:45 决策：**接受，TEST_FREQ 保持 25 不动**，
+  评测点密度优先于墙钟。已评估过的替代方案（TEST_FREQ=50、分层抽样到 1/3、
+  评测与存档解耦）均未采纳，不要在后续轮次里当作待办重新提出。
+
+test_freq_rule: >
+  两条大 arm 统一 TEST_FREQ=25（而不是各自缩放），因为跨 arm 比较是本轮的全部目的，
+  评测点落在同一个步数网格上才能直接对齐：llava_hound 24 个点、vlm3r 20 个点。
+  vsi_appr_order 只有 27 步，必须单独用 TEST_FREQ=3（9 个点），
+  它的网格与另两条不同——这条 arm 本来就已经是不同口径。
+  SAVE_FREQ 与 TEST_FREQ 对齐，每个评测点都有 checkpoint 可供离线复算。
+
+known_limitation: >
+  1. **池大小差 20 倍**（37,509 / 30,567 / 1,735 / 待定），所以 1 个 epoch 对应的步数
+     从 27 到 586。步数已按 epoch 对齐（见 step_budget_rule），但这意味着
+     vsi_appr_order 只有 27 次参数更新，**它测的是「27 步能不能看出方向」，
+     不是「方法在这个数据集上的渐近行为」**，与另两条不是同一个问题。
+  2. **teacher 可靠性数字是 32/8 视角混合口径**：报告的 per-source 正确率是在
+     `main_train.parquet` 的原始视角数下测的（spar_32view 是 32 张）。本轮 teacher 上限 8 张，
+     受控扫描显示不点名帧题型 8 张 = 18.4% vs 32 张 = 22.0%，所以 spar_32view 一旦启动，
+     其 teacher 可靠性会低于报告的 19.9%。另两条 arm 原本就 <=8 张，不受影响。
+  3. **K 与题型仍未完全解耦**：K 从 {2,3,4,5} 逐样本抽，同一数据源内 K 是变量（这是相对
+     view_ratio 的改进），但不同数据源的相册长度分布不同（llava_hound 有 6,986 条 N<8），
+     所以跨 arm 比较 K 效应仍不合法。
+
+arms:
+  - arm_id: llava_hound
+    experiment_name: 20260821_mvopsd_single_llava_hound_main
+    node: node-A
+    status: cancelled
+    data_source: llava_hound_64k
+    teacher_reliability_at_launch: "57.7%（报告 2.2 节，37,509 条，语义 judge 口径）"
+    train_rows: 37509
+    holdout_rows: 500
+    total_steps: 586
+    epochs: 1.0
+    test_freq: 25
+    train_file: data/mvopsd/parquet_single_llava_hound_64k/main_train.parquet
+    mean_k: 3.48
+    mean_teacher_views: 7.61
+    mean_ratio: 2.45
+    k_distribution: {2: 9423, 3: 9650, 4: 9437, 5: 8999}
+    teacher_view_distribution: {4: 277, 5: 1519, 6: 3802, 7: 1291, 8: 30620}
+    truncated_albums: 0
+    prompt_tokens_measured:
+      student: "min 188 p50 609 p99 1318 max 1332（上限 4096）"
+      teacher: "min 440 p50 1193 p99 2093 max 2108（上限 12288，thinking 开）"
+    note: >
+      唯一一条金标是开放式自然语言描述的 arm，没有规则判分层，可靠性 57.7% 是
+      gpt-oss-120b 语义口径且校准负例误接受率约 1%（报告 4.1 节）。
+      视角是视频帧，尺寸不统一（11 种，512x256 到 512x512，即 128~256 visual token/张），
+      这也是唯一一条 192 token/张的解析式估计不成立的 arm。
+  - arm_id: vlm3r
+    experiment_name: 20260821_mvopsd_single_vlm3r_main
+    node: node-B
+    status: cancelled
+    data_source: vlm3r_scannet
+    teacher_reliability_at_launch: "44.0%（报告 2.2 节，30,567 条，选择题精确匹配 + 数值 MRA）"
+    train_rows: 30567
+    holdout_rows: 500
+    total_steps: 477
+    epochs: 1.0
+    test_freq: 25
+    train_file: data/mvopsd/parquet_single_vlm3r_scannet/main_train.parquet
+    mean_k: 3.50
+    mean_teacher_views: 7.98
+    mean_ratio: 2.56
+    k_distribution: {2: 7640, 3: 7679, 4: 7580, 5: 7668}
+    teacher_view_distribution: {4: 74, 5: 12, 6: 3, 7: 138, 8: 30340}
+    truncated_albums: 0
+    prompt_tokens_measured:
+      student: "min 430 p50 698 p99 1085 max 1087（上限 4096）"
+      teacher: "min 816 p50 1648 p99 1665 max 1667（上限 12288，thinking 开）"
+    note: >
+      判分最硬的一条：金标是选项字母或裸数值，反向抽查分歧只有 0.51%（2/391）。
+      所以若四条 arm 里只有一条的读数可以当准确率用，是这一条。
+  - arm_id: vsi_appr_order
+    experiment_name: 20260821_mvopsd_single_vsi_appr_order_main
+    node: "待定（round 1 结束后）"
+    status: cancelled
+    data_source: vsi_appr_order
+    teacher_reliability_at_launch: "55.3%（报告 2.2 节，1,735 条，选项精确匹配）"
+    train_rows: 1735
+    holdout_rows: 174
+    total_steps: 27
+    epochs: 1.0
+    test_freq: 3
+    train_file: data/mvopsd/parquet_single_vsi_appr_order/main_train.parquet
+    mean_k: 3.49
+    mean_teacher_views: 8.00
+    mean_ratio: 2.57
+    k_distribution: {2: 483, 3: 479, 4: 470, 5: 477}
+    truncated_albums: 0
+    note: >
+      用户 2026-08-21 决策「跑完一轮即可」：1,735 / 64 = 27 步 = 1 个 epoch。
+      TEST_FREQ 用 3（9 个评测点），沿用 25 的话 27 步内只有 2 个点。
+      这条 arm 与 VSI-Bench 的 obj_appearance_order 题型同源，**它的训练集与评测集
+      在题型上重叠**，所以它的 VSI-Bench 涨幅不能与另三条同等看待——
+      那更接近 in-domain 微调而不是空间能力迁移。这一点在读数时必须写明。
+  - arm_id: spar_32view
+    experiment_name: null
+    node: null
+    status: cancelled
+    data_source: spar_32view
+    teacher_reliability_at_launch: "19.9%（报告 2.2 节，20,525 条）"
+    blocked_on: >
+      teacher 相册要从 32 张压到 8 张，但 12,051/21,025 条（57%）的题面直接点名
+      Frame-N（最多 5 个），这些帧上画着红/蓝标记点。机械层面已解决：
+      build_single_source_plans.py 把被点名的帧钉住必留、补随机帧到 8 张、再把题面重编号，
+      renumber_frame_refs 找不到映射时抛异常而非留悬空帧号。
+      未解决的是证据层面：受控扫描（sweep_spar32）只覆盖 4 个**不点名帧**的题型，
+      测出 8 张 = 18.4% vs 32 张 = 22.0%（保住 84%）。点名帧的 4 个题型是距离题，
+      需要跨视角三角化——被点名的两帧只标出「是哪两个物体」，算出「相距 2.1 米」要靠
+      其余视角重建尺度。从 32 砍到 8 对它们的代价**没有任何数据**。
+      用户 2026-08-21 决定「先暂时不测」，等前三条有结论再定。
+    tradeoff_measured:
+      frame_agnostic_only: {rows: 8974, weighted_teacher_reliability: "19.4%"}
+      all_truncated_to_8: {rows: 21025, weighted_teacher_reliability: "19.9%（32 张口径，8 张会更低）"}
+      all_minus_imagination_oo: {rows: 15155, weighted_teacher_reliability: "27.1%"}
+    counterintuitive_finding: >
+      「只保留证据覆盖到的部分」给出**最差**的训练池。近零可靠性的题型
+      （spatial_imagination_oo_video_hard 1.5%、oc_video_hard 12.5%）集中在不点名帧那一半，
+      而 teacher 最可靠的两个题型（distance_prediction_oo 35.1%、
+      distance_infer_center_oo 35.0%）全在点名帧那一半。
+      另外 spatial_imagination_oo_* 的 1.3~1.5% 是格式问题不是能力问题（ISSUE-T05）：
+      金标要三条轴全对，teacher 只答一条，在它说出口的轴上准确率 68.2%。
+
+relations:
+  - kind: depends_on
+    experiment_id: 20260820_teacher_reliability
+    why: "四条 arm 的选择与排序假设完全来自它的 per-source / per-type 可靠性表。"
+  - kind: supersedes_design_of
+    experiment_id: 20260820_mvopsd_view_ratio
+    why: >
+      view_ratio 用「K = N 的固定比例」，把 K 与落差绑死且与数据源绑死。
+      本轮改成 K 从固定菜单逐样本抽，同一数据源内 K 才成为变量。
+  - kind: comparable_baseline
+    experiment_id: null
+    why: >
+      基座锚点。训练内 VSI-Bench 的 step 0 = **53.62**
+      （2026-08-21 诊断，train_20260820_173529.log:6276；判分侧修 ISSUE-301 后重算同一批
+      回答为 53.64）。离线 vLLM 52.58、离线 HF/lmms_eval 53.40 是**不同引擎口径**，
+      不要拿来当训练内曲线的锚点。
+
+data:
+  pools_built_by: scripts/opsd/build_single_source_plans.py
+  builder_seed: 20260821
+  teacher_view_cap: 8
+  k_menu: [2, 3, 4, 5]
+  k_draw_rule: >
+    逐样本从菜单里均匀抽，约束 max(1, len(required_views)) <= K < len(teacher_views)。
+    K 必须严格小于 teacher 的相册（不是小于原始 N），否则截断后落差归零。
+    N=4 的样本因此只能抽到 {2,3}，N=5 只能抽到 {2,3,4}——这是相册长度的约束，
+    不是抽样偏差，四条 arm 里只有 llava_hound（6,986 条 N<8）与 vlm3r（227 条）受影响。
+  pixels_untouched: >
+    stage 2 未重跑。本轮只改「两侧各看哪几张已缓存的视角」，
+    build_single_source_plans.py 与 build_view_ratio_plans.py 同理。
+  holdout_rule: "按场景切 5% 的场景，每源上限 500 条（write_mvopsd_parquet.py 默认）"
+  verification:
+    view_files_checked: "llava_hound 274,927 张 / vlm3r 9,376 张，unreadable or misaligned = 0"
+    student_subset_of_teacher: "两个池逐行校验通过（0 违例）"
+    placeholder_image_match: "0 不匹配"
+    k_lt_n_le_8: "0 违例"
+
+code:
+  new:
+    - scripts/opsd/build_single_source_plans.py
+  changed:
+    - path: scripts/opsd/write_mvopsd_parquet.py
+      what: >
+        build_row 认 plan 里可选的 teacher_view_indices / teacher_body，
+        用于把 teacher 相册压到 N 以下；缺省时行为与 2026-08-21 之前完全一致。
+        verify_views 与 report 的 teacher token 统计同步改成只数 teacher 实际看到的视角。
+    - path: scripts/opsd/tools/check_prompt_lengths.py
+      what: >
+        per-view token 数改为从缓存文件头实测，不再硬编码 192。
+        见 issues 里的 ISSUE-302。
+  unchanged_but_load_bearing:
+    - "verl_pkg/verl/trainer/config/mvopsd.yaml：rollout.n=1、lr 2e-6、teacher_enable_thinking=True"
+
+parameters:
+  model: models/Qwen3.5-4B
+  lr: 2.0e-6
+  lr_warmup_steps: 10
+  train_batch_size: 64
+  ppo_mini_batch_size: 64
+  rollout_n: 1
+  loss_mode: vopd
+  loss_agg_mode: token-mean
+  alpha: 0.5
+  is_clip: 2.0
+  distillation_topk: 100
+  teacher_regularization: frozen
+  teacher_update_rate: 0.0
+  teacher_enable_thinking: true
+  student_enable_thinking: false
+  validation_enable_thinking: false
+  max_prompt_length: 4096
+  max_response_length: 1024
+  max_reprompt_len: 12288
+  test_freq: "25（两条大 arm 同网格）；vsi_appr_order 用 3"
+  save_freq: "与 test_freq 对齐"
+  val_benchmark: "VSI-Bench 全量 5,130 题 / 32 帧"
+  judge: "gpt-oss-120b，vLLM sleep 模式，只对规则读不出的行唤醒"
+
+decision_criteria:
+  primary: "val-core/vsibench/overall/acc，与基座锚点 53.62 比"
+  supporting:
+    - "val-core/vsibench/answered/frac：掉了就说明模型不再输出可读答案，主指标随即失去意义"
+    - "val-core/vsibench/resp_tokens/mean：与训练侧 response_length/mean 同单位，长度是退化最早的信号（LESSON-020）"
+    - "val-aux/vsibench/resp_tokens/median：均值不动可能掩盖中位数翻倍，反之亦然（基座上 mean 97.1 vs median 3）"
+    - "self_distillation/raw_jsd_token_mean：teacher 开 thinking 后平台预期整体上移，冒烟 step 2 = 0.0619（前四条 arm 平台 0.018~0.022）；移位本身不是方法有效或无效的证据"
+    - "self_distillation/teacher_probe：frozen teacher 下必须恒定，变了就说明 teacher 在动"
+  interpretation_rule: >
+    只读「四条 arm 的排序是否与 teacher 可靠性一致」。**不要**读某条 arm 的绝对值
+    高于另一条就说该数据集更好——池大小、题型结构、金标形式、epoch 数都不同。
+    vsi_appr_order 额外还有训练/评测题型重叠的问题（见该 arm 的 note）。
+
+must_watch:
+  - "训练侧 response_length/mean 是否单调上涨：v0/v1 的退化形态是答案变成散文（LESSON-020）"
+  - "val-core/vsibench/resp_tokens/mean 与 median 同时看"
+  - "self_distillation/policy_fallback_fraction 必须恒为 0：不为 0 说明有样本没拿到 teacher 视角，而配置里 fallback_to_policy_loss_on_missing_teacher=False 本该直接报错"
+  - "actor/lr 在第 10 步后应到 2e-6"
+
+artifacts:
+  llava_hound:
+    log_dir: logs/train/20260821_mvopsd_single_llava_hound_main/
+    checkpoints: checkpoints/20260821_mvopsd_single_llava_hound_main/
+    rollouts: rollouts/20260821_mvopsd_single_llava_hound_main/
+    val_dumps: logs/val/20260821_mvopsd_single_llava_hound_main/
+    wandb: "MV-OPSD / 20260821_mvopsd_single_llava_hound_main"
+  vlm3r:
+    node: node-B
+    log_dir: logs/train/20260821_mvopsd_single_vlm3r_main/
+    checkpoints: "已删（2026-09-07 node-B；原 checkpoints/20260821_mvopsd_single_vlm3r_main/ 213G）"
+    rollouts: rollouts/20260821_mvopsd_single_vlm3r_main/
+    val_dumps: logs/val/20260821_mvopsd_single_vlm3r_main/
+    wandb: "MV-OPSD / 20260821_mvopsd_single_vlm3r_main"
+
+smoke:
+  experiment_name: 20260821_mvopsd_single_llava_hound_main_smoke
+  purpose: "rollout.n=1、新 resp_tokens 指标、teacher thinking 三项改动第一次进真实训练回路"
+  config: "2 步 / batch 8 / n=1 / JUDGE=0 / val = vsibench_val_3scenes.parquet"
+  results:
+    grpo_fallback_count: 0.0
+    vopd_loss_step2: 0.0618953425437212
+    raw_jsd_token_mean_step2: 0.0618953425437212
+    teacher_probe: 0.04456961154937744
+    teacher_always_on_fraction: 1.0
+    teacher_image_swap_fraction: 1.0
+    policy_fallback_fraction: 0.0
+    resp_tokens_mean: "99.1 → 101.4（median 4、p95 362→393、max 414）"
+    training_response_length_mean: "236.5 → 198.6"
+    lr_at_step2: 2.0e-7
+    time_per_step_s: "16.9 → 10.9（batch 8）"
+  conclusion: >
+    n=1 下 vopd 分支正常、没有 NaN、grpo 回退计数为 0；新指标按预期落盘且与训练侧同单位；
+    JSD 0.0619 高于前四条 arm 的 0.018~0.022 平台，与「teacher 改成推理态分布」的预测同向。
+
+results:
+  report: experiments/reports/汇报_20260821_单数据集训练验证Teacher可靠性影响.md
+  termination:
+    decision: "用户 2026-08-21 23:40 决定暂停两台 node 的实验"
+    llava_hound:
+      last_completed_train_step: 199
+      planned_steps: 586
+      data_fraction_seen: 0.3396
+      latest_complete_validation_step: 175
+      latest_checkpoint_step: 175
+    vlm3r:
+      last_completed_train_step: 116
+      planned_steps: 477
+      data_fraction_seen: 0.2429
+      latest_complete_validation_step: 100
+      latest_checkpoint_step: 100
+    process_cleanup: >
+      两条 MV-OPSD 的 launcher / main_ppo / Ray / vLLM 训练进程均已退出。
+      node-A 8 卡显存归零。node-B 的 MV-OPSD 进程已清零，但卡上仍有另一个工作区
+      Model-Dowser/LLaVA 的 DeepSpeed 作业；它不属于本实验，未做干预。
+  primary_metric:
+    llava_hound:
+      step_0: 0.5338323334539066
+      step_25: 0.21920786216563054
+      step_175: 0.2131423576339059
+      delta_step0_to_last_pp: -32.07
+    vlm3r:
+      step_0: 0.5336196303412142
+      step_25: 0.18981804328752533
+      step_100: 0.20276884394542033
+      delta_step0_to_last_pp: -33.08
+  response_length:
+    llava_hound:
+      val_step_0: {mean: 94.55, median: 4, p95: 334, at_1023_plus: 0.0191}
+      val_step_25: {mean: 1014.97, median: 1024, p95: 1024, at_1023_plus: 0.9739}
+      val_step_175: {mean: 1015.67, median: 1024, p95: 1024, at_1023_plus: 0.9721}
+      train_step_1: {mean: 225.72, clip_ratio: 0.0, vopd_loss: 0.06696}
+      train_step_25: {mean: 821.28, clip_ratio: 0.5, vopd_loss: 0.01385}
+      train_step_175: {mean: 899.42, clip_ratio: 0.671875, vopd_loss: 0.00979}
+    vlm3r:
+      val_step_0: {mean: 93.80, median: 4, p95: 335, at_1023_plus: 0.0168}
+      val_step_25: {mean: 1024.0, median: 1024, p95: 1024, at_1023_plus: 1.0}
+      val_step_100: {mean: 1019.60, median: 1024, p95: 1024, at_1023_plus: 0.9842}
+      train_step_1: {mean: 256.0, clip_ratio: 0.015625, vopd_loss: 0.18356}
+      train_step_15: {mean: 1021.64, clip_ratio: 0.984375, vopd_loss: 0.02923}
+      train_step_100: {mean: 1017.5, clip_ratio: 0.984375, vopd_loss: 0.02012}
+  offline_eval_step100_tok4096:
+    requested_by: "用户 2026-08-23：取 llava_hound step 100 的 checkpoint，response 上限 4096，先 vLLM 推理再算准确率"
+    model: output/20260821_mvopsd_single_llava_hound_main_global_step_100_hf
+    protocol: "spatialstack / 32 帧 / greedy / max_model_len 16384 / 规则层 + gpt-oss-120b judge"
+    driver: scripts/opsd/run_llava_hound_step100_vsi4096.sh
+    artifacts: logs/vsi_train_eval/20260821_mvopsd_single_llava_hound_main/global_step_100/
+    wall_minutes: 54.2
+    results:
+      rule_only_overall: 23.00
+      judge_assisted_overall: 23.07
+      rule_answered_pct: 97.45
+      truncated_pct: 90.62
+      output_tokens: {median: 4096, p90: 4096, p99: 4096, max: 4096}
+      judge: {rows_sent: 131, recovered: 1, unparsed: 0, api_errors: 0}
+    by_question_type_rule_only:
+      object_rel_direction_easy: 47.47
+      object_rel_direction_medium: 37.57
+      object_rel_distance: 33.38
+      object_rel_direction_hard: 31.37
+      route_planning: 28.35
+      obj_appearance_order: 28.16
+      object_size_estimation: 18.96
+      room_size_estimation: 18.06
+      object_counting: 9.40
+      object_abs_distance: 8.91
+    reading_constraint: >
+      同 checkpoint 的训练内 1024-token 验证给 micro 21.17%（非官方 8 题型非加权口径），
+      离线 4096 的官方口径为 23.00%，两者口径与预算都不同，不能直接相减当作“放宽预算的收益”。
+      能确定的是：预算翻到 4096 后仍有 90.62% 的输出撞满上限，说明瓶颈不是预算不足而是
+      重复枚举形态本身，与 ISSUE-305 同向。
+    scoring_caveat: >
+      满分行里存在“幸运误解析”：id=168（sofa 最长边，金标 173cm）的回答撞满 4096 且通篇
+      是 `Image N: Kitchen.` 逐帧枚举，未给出答案句；解析器兜底取“最后一行含数字的行的最后一个数”，
+      抽到帧号 178，相对误差 2.89% < 5%，MRA 十档全过记满分，failure 标签因先判满分而记为 correct。
+      因此本轮 23.00% 是解析口径下的上界，不等价于“模型理解正确”的比例。
+      2026-08-23 已修复解析器（跳过 `Image N:` 枚举行）并重评，见 rescore_step100_tok4096。
+  rescore_step100_tok4096:
+    requested_by: "用户 2026-08-23：5130 题全量重评，修复 Image 帧号误解析"
+    tool: scripts/opsd/tools/rescore_vsibench_samples.py
+    parser_fix: "vsibench_scoring._IMAGE_LABEL_LINE_RE 跳过 * Image N: 枚举行"
+    artifacts: logs/vsi_train_eval/20260821_mvopsd_single_llava_hound_main/global_step_100/rescore/
+    rows_rule_changed: 325
+    results:
+      rule_only_overall: 22.90
+      judge_assisted_overall: 22.97
+      delta_rule_only: -0.10
+      delta_judge_assisted: -0.10
+      full_credit_lost: 5
+      full_credit_gained: 3
+    id168_after_rescore: {parsed: 150, score: 0.8, failure_reason: truncation_error}
+    by_question_type_rule_only:
+      object_rel_direction_easy: 47.47
+      object_rel_direction_medium: 37.57
+      object_rel_distance: 33.38
+      object_rel_direction_hard: 31.37
+      route_planning: 28.35
+      obj_appearance_order: 28.16
+      room_size_estimation: 18.33
+      object_size_estimation: 17.08
+      object_counting: 9.96
+      object_abs_distance: 9.17
+  conclusion: >
+    两条独立单源 arm 都在 10~25 步内从短答转为逐帧长篇分析，VSI-Bench 验证输出的
+    median 从 4 token 变为 1024，约 97~100% 输出撞到预算；overall 同时从约 53.4%
+    降到约 19~22%，之后不恢复。VOPD loss 却持续下降，说明 token 分布对齐与任务正确率
+    发生目标错位。57.7% 与 44.0% 两种 Teacher 可靠性下出现同形崩溃，
+    因而当前共享机制的影响远大于数据源可靠性差异。
+  code_scope_audit: >
+    已核对 Vision-OPD 与当前实现：VOPD 只在 response_mask 标记的 Student 生成 token 上
+    计算，不蒸馏 prompt / image token / prompt 内 thinking 标记；Teacher 对同一条
+    Student response 做 teacher forcing。代码没有 answer-only mask，因此 response 中的
+    逐帧分析与最终答案等权进入 loss。该范围与 Vision-OPD 相同，不是误把 prompt/image
+    纳入 loss 的实现 bug。
+  root_cause_assessment: >
+    已证实的直接机制是 response-length explosion + truncation。teacher_enable_thinking=True
+    让 Teacher 在开放 <think> 上下文中给 Student 的全部 response token 提供推理态 soft target，
+    与 Vision-OPD 的双侧 non-thinking 不同，是最高优先级机制假设；但本轮同时改变了数据源、
+    rollout.n 与 thinking，缺少单变量对照，不能把它写成已经证明的唯一根因。
+  root_cause_followup:
+    resolved_at: "2026-08-24T04:18:00+08:00"
+    by: "experiments/registry/20260824_teacher_thinking_off.yaml"
+    note: >
+      **上面那条 root_cause_assessment 保持原样，不修改**——它在当时的证据下是正确的
+      表述（标为假设而非结论）。以下是补上单变量对照后的判定。
+    verdict: >
+      假设成立。只改 `teacher_enable_thinking`（True -> False）、其余与本 arm 逐项相同的
+      25 步诊断里，长度爆炸**完全没有发生**：训练侧 response_length/mean 25 步全程
+      187.8~233.8 无趋势（本 arm 同期 225.7 -> 821.3），clip_ratio 25 步里 23 步为 0
+      （本 arm step 25 为 0.5），验证 resp_tokens 中位保持 4（本 arm 变为 1024）。
+      step 25 的 VSI rule_only 52.57 vs 本 arm 20.85，**差 31.72 pp**。
+      故 response-length explosion 的主要机制确认为 teacher/student 的 thinking mode
+      mismatch，`root_cause_assessment` 里的 diagnosed 可升级为 confirmed。
+    still_not_established: >
+      thinking=False 只是消除了破坏，**没有产生收益**（53.38 -> 52.57，−0.81 pp / 0.043 epoch）。
+      且对照 arm 里出现了一条新的早期信号：验证 resp_tokens 的 p95 从 333 涨到 1024、
+      answered/frac 98.23% -> 95.05%，即长尾在变粗而中位数不动。
+      因此「teacher 关 thinking」不是本方法的修复方案，只是移除了一个混淆因素。
+  decision:
+    - "停止 llava_hound 与 vlm3r，不继续到 1 epoch"
+    - "vsi_appr_order 与 spar_32view 不启动，先排除共享失效机制"
+    - "若继续，优先只做 teacher_enable_thinking=False、其余不变的 25-step 最小诊断"
+    - "（2026-08-24 追记）上一条已执行完毕并证实假设，见 root_cause_followup；共享失效机制已排除，另两条 arm 的启动前置条件解除"
+
+issues:
+  - id: ISSUE-301
+    title: "MRA 阈值与上游差最后几位，训练内 VSI-Bench 系统性低报"
+    status: resolved
+    found_at: "2026-08-21 一级指标诊断（用户要求查验主指标计算）"
+    symptom: "同一批 5,130 行回答，训练内判分 53.62，lmms_eval 53.64"
+    evidence: >
+      逐行比对定位到 8 行分歧，全部是数值题且预测值恰好压在阈值上
+      （1.1 vs 1.0、9 vs 10、1.7 vs 2.0、18 vs 20），分歧方向恒定为我们更低。
+      恒定方向是关键特征——真随机的判分噪声会双向抖动。
+    root_cause: >
+      上游 src/lmms_eval/tasks/vsibench/utils.py:180-184 是
+      np.linspace(0.5, 0.95, int((0.95-0.5)/0.05 + 2))，int() 把 10.999999999999998 截成 10，
+      个数确实是 10 个；但 numpy 的第 8 个阈值是 0.8999999999999999，1-阈值 = 0.10000000000000009，
+      而我们写的 0.5+0.05*i 给 0.9，1-阈值 = 0.09999999999999998。
+      「相对误差恰好 0.1」在浮点里是 0.10000000000000009，正好落在两者之间。
+    solution: >
+      mean_relative_accuracy 收成全仓一份放进 scripts/opsd/vsibench_scoring.py，
+      按上游同样的 linspace 构造阈值；mvopsd_reward.py 与 spar_scoring.py 都改为引用
+      （原先各写了一份同样的错法）。
+    verification: >
+      5,130 行逐行 0 分歧，双方 overall 都是 53.6391；
+      离线 vLLM 归档那条 parity 从 52.57 vs 52.58 变成 52.58 vs 52.58。
+      test_val_metric_invariance.py 另用 6 个压阈值样例直接对比上游。
+    blast_radius: >
+      一位小数网格上仅 0.042% 的（预测, 金标）组合会变；teacher 可靠性 as_trained
+      124,306 行里 127 行变（0.10%），numeric family 均值 39.94 → 39.98，
+      总体 <=0.01pp，41.4% 仍是 41.4%。**已发布报告数字不改。**
+    prevention: LESSON-024
+  - id: ISSUE-302
+    title: "check_prompt_lengths.py 对 llava_hound 报假警「do not launch training on this data」"
+    status: resolved
+    symptom: "llava_hound 池的 4 项检查全部 MISMATCH，工具以「不要在这份数据上启动训练」退出"
+    evidence: >
+      估计 1012 实测 772，估计 1596 实测 2108——两个方向都有偏差，说明不是数据超限，
+      是估计式错了。实测视角尺寸有 11 种：512x288(144 token) 134,104 张、
+      512x512(256) 93,340 张、512x384(192) 17,572 张等。
+    root_cause: >
+      工具硬编码 TOKENS_PER_VIEW=192。SPAR 与 vlm3r 的视角全是 512x384 所以恰好正确，
+      而 llava_hound 是视频帧，尺寸不统一。
+    solution: "per-view token 数改为从缓存文件头实测（measure_views）"
+    verification: >
+      修后 llava_hound 两侧都逐行 ok：student max 1332 / 上限 4096，
+      teacher max 2108 / 上限 12288。
+    prevention: >
+      「一个常量在某个数据源上恰好正确」不等于它是常量。工具的自洽检查报错时，
+      先判断是数据违规还是估计式违规——本例中偏差有正有负，数据违规不会这样。
+  - id: ISSUE-303
+    title: "node-B 缺 VSI-Bench 验证集，会在 val_before_train 的第一步失败"
+    status: resolved
+    symptom: "启动前检查发现 node-B 没有 data/eval/vsibench_verl/"
+    root_cause: >
+      2026-08-20 的训练内评测链从 CV-Bench 换成 VSI-Bench 时只在 node-A 上建了数据集，
+      node-B 上一轮（kquarter arm）跑的是 CV-Bench 评测，所以缺失一直没暴露。
+    solution: "rsync 2.0 GB 到 node-B（4 秒，466 MB/s）"
+    prevention: >
+      run_mvopsd.sh 在 TEST_FREQ != -1 时已经会检查 VAL_FILE 存在并 exit 1，
+      所以这个坑不会静默——但它会在启动 30 秒后才炸。跨机启动前先核对数据集清单更省时间。
+  - id: ISSUE-304
+    title: "PATH 里 miniconda 的 python3 排在系统 python 之前，训练直接 ModuleNotFoundError"
+    status: workaround
+    symptom: "run_mvopsd.sh 启动后立刻 ModuleNotFoundError: No module named 'numpy'"
+    root_cause: >
+      训练环境是系统 python3.12 + ~/.local，而 PATH 里
+      /home/c30084464/miniconda3/bin 排在 /usr/bin 之前，其 python3 是 3.14.6
+      的 conda base env，没有 numpy/torch/verl。
+    solution: "启动时前置 PATH=/usr/bin:$PATH（两机都是）"
+    prevention: >
+      run_mvopsd.sh 里的 python3 是裸调用。若要根治应让脚本显式用 /usr/bin/python3
+      或在启动时校验 python3 -c 'import verl'——尚未改，因为不确定用户交互 shell 的 PATH
+      是否与此不同。
+  - id: ISSUE-305
+    title: "单源训练 10~25 步内发生 response-length explosion，VSI-Bench 崩至约 20%"
+    status: diagnosed
+    found_at: "2026-08-21 Round-1 正式训练"
+    symptom: >
+      llava_hound step 25 的训练 response mean=821、clip=50%，VSI 53.38% -> 21.92%；
+      vlm3r step 15 已 mean=1021.6、clip=98.4%，step 25 VSI 53.36% -> 18.98%。
+      后续训练到 step 175 / 100 仍无恢复。
+    evidence: >
+      全量 VSI 5,130 题的 response median 从 step 0 的 4 token 变为 1024；
+      llava_hound 最新验证 97.2%、vlm3r 98.4% 的输出达到 1023+ token。
+      输出形态是 Frame/Image 逐项枚举，常在最终答案前被切断。
+    root_cause: >
+      直接机制已确认是响应长度失控与截断。VOPD 只蒸馏 Student response，不蒸馏 prompt/image；
+      但整段 response 等权参与 JSD。Teacher thinking 开、Student thinking 关的 mode mismatch
+      很可能把 soft target 推向推理态长文本；尚缺 thinking on/off 单变量实验，状态为 diagnosed
+      而非 resolved。
+    solution: >
+      用户决定提前停止两条正式 run，并暂停另外两条 arm。若重试，先用 llava_hound
+      做 teacher_enable_thinking=False 的 25-step 最小诊断；不要直接重启全 epoch。
+    prevention: >
+      把 step 10/15/20 的训练 response mean/clip_ratio 加入硬性早停观察；
+      验证侧同时看 median 与达到 cap 的比例，不能只看 answered/frac 或 VOPD loss。
+
+  - id: ISSUE-306
+    title: "HTML 结果查看器把 parquet 的 id 与 index 混成同一个 key，51.4% 的行元数据与帧错位"
+    status: resolved
+    found_at: "2026-08-23 用户在查看器里追问某题为何判对时暴露"
+    symptom: >
+      离线评测查看器页面上，题面 / 金标 / 回复 / 分数正确，但题型、场景、index、id
+      与 32 帧输入图属于另一道题。例：samples.jsonl 的 id=168（object_size_estimation，
+      场景 41069025，金标 173）在页面上显示为 object_abs_distance、场景 42445026，
+      并配了 42445026 的帧。
+    evidence: >
+      build_vsibench_val_viewer.py::parquet_by_id 把 str(extra.id) 与 str(extra.index)
+      写进同一个 dict：10,260 次插入只剩 5,155 个 key，跨行覆盖 5,103 次。
+      按 samples.jsonl 逐行核对，5,130 行里 2,638 行（51.4%）join 到了错误的 parquet 行。
+      key "168" 先由 row 3（extra.id='168'）写入，后被 row 168（extra.index=168）覆盖。
+    root_cause: >
+      parquet 中 extra.id 是字符串、extra.index 是整数，原生不会撞 key；
+      是 parquet_by_id 里的 str() 归一化把两个不同命名空间压成一个，人为制造了碰撞。
+      随后 build_sample 的字段优先级是 extra 优先于 dump，于是错误行的元数据覆盖了
+      评测记录自带的正确元数据；图片则只能来自 parquet 行，必然跟着错。
+    solution: >
+      parquet_by_id 改为只按 extra_info.id 建表（已验证 5,130 个 id 全局唯一，
+      samples 侧 id 全部命中），重复 id 直接 SystemExit 而不是静默覆盖；
+      build_sample 新增 _prefer_dump()，question_type / dataset / scene_name / id
+      一律以评测记录为准，parquet 只负责帧路径；新增 meta_ok / meta_conflicts 两列，
+      两侧元数据冲突时页面标红并提示“这些帧不属于本题”，筛选框加“元数据错位”一项；
+      构建脚本收尾打印错位条数。重建后错位 0/5130，failure 分布
+      （3978/937/124/91）与修复前逐项一致，证明判分未被触碰。
+    status_note: >
+      分数与 summary.json 从未受影响——判分在 vsibench_eval_core 内完成，
+      不经过这个 join。受影响的只有查看器的展示层。
+    prevention: >
+      见 LESSON-028。一张映射表只允许一个命名空间；join 后必须做交叉校验并把
+      不一致显式暴露在产物里，不能让展示层静默拼接两个来源。
+
+activity_log:
+  - at: "2026-09-07T23:43:00+08:00"
+    who: cursor-window-mvopsd
+    what: >
+      node-B 按用户要求删除 checkpoints/20260821_mvopsd_single_vlm3r_main/（213G）。
+      训练日志 / val dump / wandb 未动。
+  - at: "2026-08-21T15:35+08:00"
+    who: cursor-window-mvopsd
+    what: >
+      用户与老师决策：只用单数据集训练，四条 arm，优先 llava_hound_64k 与 vlm3r_scannet，
+      再 vsi_appr_order 与 spar_32view；lr 仍 2e-6，teacher 视角上限 8，K 从 {2,3,4,5} 抽。
+      随后确认两机可同时部署。
+  - at: "2026-08-21T15:45+08:00"
+    who: cursor-window-mvopsd
+    what: >
+      写 build_single_source_plans.py；write_mvopsd_parquet.py 加 teacher_view_indices /
+      teacher_body 支持。建 llava_hound（37,509）与 vlm3r（30,567）两个池，
+      --check-files 全过，结构与长度逐行校验通过。修 ISSUE-302。
+  - at: "2026-08-21T15:55+08:00"
+    who: cursor-window-mvopsd
+    what: "两机 GPU 确认全空（16 卡 0 MiB）。node-A 冒烟 2 步通过，三项改动全部确认。"
+  - at: "2026-08-21T16:09+08:00"
+    who: cursor-window-mvopsd
+    what: >
+      node-A 启动 llava_hound（300 步），node-B rsync VSI-Bench 验证集后启动 vlm3r（300 步）。
+      建好 vsi_appr_order 池（1,735 条，1 epoch = 27 步）待 round 1 结束后启动。
+      spar_32view 按用户决策暂缓，先不测点名帧题型的视角敏感度。
+  - at: "2026-08-21T16:33+08:00"
+    who: cursor-window-mvopsd
+    what: >
+      **两条 arm 停掉重启，步数从 300 改为 1 个 epoch**（用户：步数要按数据集总量定，
+      不能盲目设 300）。停止时两条都还在 val_before_train、**尚未走到第 1 个训练步、
+      没有 checkpoint**，所以只损失约 20 分钟的首次评测，没有丢弃任何训练结果。
+      TERM 进程组后 16 卡显存全部归零、无残留 ray/vllm 进程，确认干净。
+      重启：llava_hound 586 步、vlm3r 477 步，两者 TEST_FREQ=25。
+      第一次启动的日志保留在 logs/train/<exp>/train_20260821_160914.log 与
+      train_20260821_160951.log，其中 total_training_steps=300，不要误当作本轮配置。
+  - at: "2026-08-21T23:40+08:00"
+    who: cursor-window-mvopsd
+    what: >
+      用户决定暂停两台 node 的实验。停止时 llava_hound 完成 199/586 步，
+      最近完整验证/checkpoint 为 step 175；vlm3r 完成 116/477 步，
+      最近完整验证/checkpoint 为 step 100。两条都已在 step 25 前发生严重长度退化：
+      验证 median=1024、截断率约 97~100%、VSI overall 从约 53.4% 降至约 19~22%。
+      TERM 两个 launcher process group 后确认 MV-OPSD 的 main_ppo/Ray/vLLM 进程清零。
+      node-A 显存归零；node-B 仍有另一个工作区的 LLaVA/DeepSpeed 作业占卡，未干预。
+      已写正式汇报：experiments/reports/汇报_20260821_单数据集训练验证Teacher可靠性影响.md。
+  - at: "2026-08-23T15:23+08:00"
+    who: cursor-window-mvopsd
+    what: >
+      按用户要求对 llava_hound step 100 做离线 vLLM 评测，response 上限 4096。
+      merge checkpoint 为 HF；驱动排队等 boxed_probe_tok8192 释放 8 卡后 14:26 启动，
+      15:23 完成（54.2 min）。结果：rule-only 23.00 / judge 23.07，作答率 97.45%，
+      **截断率仍 90.62%，中位输出 4096**。写入 results.offline_eval_step100_tok4096。
+  - at: "2026-08-23T16:20+08:00"
+    who: cursor-window-mvopsd
+    what: >
+      用户在 HTML 查看器里追问“这题为何判对”，查明两件事：
+      (1) 该行是解析兜底抽到帧号 178、对金标 173 的相对误差 2.89% 被 MRA 判满分，
+      已记入 results.offline_eval_step100_tok4096.scoring_caveat；
+      (2) 顺带暴露查看器的 join 缺陷 ISSUE-306（id/index 共用 key，51.4% 行元数据与帧错位），
+      已修复并重建查看器，错位归零、failure 分布不变。判分与 summary.json 全程未受影响。
+
+handoff:
+  current_state: >
+    本实验已取消，四条 arm 均不再运行。llava_hound 在 step 199、vlm3r 在 step 116
+    由用户提前终止；另两条未启动。MV-OPSD 相关进程已清零。
+    node-A GPU 空闲；node-B GPU 被不属于本项目的 Model-Dowser/LLaVA 作业占用。
+  next_action: >
+    等用户决定是否做最小因果验证。推荐唯一下一步是：
+    llava_hound + teacher_enable_thinking=False，其余配置不变，只跑 25 steps；
+    在 step 10/15/20/25 观察 response_length 与 clip_ratio，并在 step 25 跑全量 VSI。
+    未完成该验证前不启动 vsi_appr_order / spar_32view。
+  do_not: >
+    不要从已有 checkpoint 续训；不要只提高 max_response_length 就宣称修复；
+    不要把 teacher thinking 记成已证明的唯一根因；不要拿 answered/frac=1.0
+    当作回答正常的证据。

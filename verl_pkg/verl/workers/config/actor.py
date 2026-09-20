@@ -45,8 +45,11 @@ class SelfDistillationConfig(BaseConfig):
         alpha (float): KL interpolation coefficient. 0.0=forward KL, 1.0=reverse KL, in-between=JSD.
         gamma (float): Weight applied to the SDPO loss.
         success_reward_threshold (float): Minimum sequence reward to be considered successful.
-        teacher_regularization (str): Teacher regularization mode. Options: "ema", "trust-region", "progressive".
-        teacher_update_rate (float): EMA update rate for teacher weights, or trust-region mixing coefficient.
+        teacher_regularization (str): Teacher regularization mode. Options: "ema", "trust-region",
+            "progressive", "frozen". "frozen" never updates the teacher, leaving it at the reference
+            weights for the whole run.
+        teacher_update_rate (float): EMA update rate for teacher weights, or trust-region mixing
+            coefficient. Ignored when teacher_regularization="frozen".
         teacher_update_interval (Optional[int]): Hard-sync the teacher to the current student every N actor updates
             when teacher_regularization="progressive".
         distillation_topk (Optional[int]): If set, use top-k logits for distillation.
@@ -67,6 +70,8 @@ class SelfDistillationConfig(BaseConfig):
         teacher_model_source (str): Teacher source. Options: "legacy", "current" or "fixed".
         teacher_model_path (Optional[str]): Fixed teacher model path when teacher_model_source="fixed".
         teacher_image_key (Optional[str]): Dataset column holding teacher-side images for multimodal distillation.
+        teacher_enable_thinking (Optional[bool]): Overrides data.apply_chat_template_kwargs.enable_thinking for the
+            teacher's prompt only. None inherits the student's setting, so the two sides render identically.
         fallback_to_policy_loss_on_missing_teacher (bool): When teacher_always_on=True, fall back to vanilla
             policy loss for samples whose teacher_image_key column is empty.
         log_prob_dump_dir (Optional[str]): Optional directory used to dump student/teacher log-prob tensors for each step.
@@ -106,6 +111,7 @@ class SelfDistillationConfig(BaseConfig):
     teacher_model_source: str = "legacy"
     teacher_model_path: Optional[str] = None
     teacher_image_key: Optional[str] = None
+    teacher_enable_thinking: Optional[bool] = None
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -120,7 +126,7 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError(f"self_distillation.alpha must be in [0,1], got {self.alpha}")
         if self.gamma < 0.0:
             raise ValueError(f"self_distillation.gamma must be non-negative, got {self.gamma}")
-        valid_teacher_regularization = ["ema", "trust-region", "progressive"]
+        valid_teacher_regularization = ["ema", "trust-region", "progressive", "frozen"]
         if self.teacher_regularization not in valid_teacher_regularization:
             raise ValueError(
                 "self_distillation.teacher_regularization must be one of "
@@ -158,6 +164,11 @@ class SelfDistillationConfig(BaseConfig):
             )
         if self.teacher_model_source == "fixed" and not self.teacher_model_path:
             raise ValueError("self_distillation.teacher_model_path is required when teacher_model_source='fixed'")
+        if self.teacher_regularization == "frozen" and self.teacher_model_source == "current":
+            raise ValueError(
+                "self_distillation.teacher_regularization='frozen' needs a teacher separate from "
+                "the student; teacher_model_source='current' has none to freeze"
+            )
         if self.teacher_regularization == "progressive":
             if self.teacher_model_source != "legacy":
                 raise ValueError(

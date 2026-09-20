@@ -1,0 +1,170 @@
+experiment_id: 20260918_spatialstack_mvopsd_llava_hound_half
+title: "SpatialStack LLaVA-Hound MV-OPSD：Teacher 全帧 / Student 一半"
+status: eval_complete
+
+created_at: "2026-09-18T22:30:00+08:00"
+started_at: "2026-09-18T22:48:26+08:00"
+driver_pid: 1332890
+train_pgid: 1332890
+python_pid: 1332970
+chain_pid: 1334212
+train_log: logs/train/20260918_spatialstack_mvopsd_llava_hound_half/train.nohup.log
+finished_at: "2026-09-19T16:38:09+08:00"
+owner: cursor-window-spatialstack
+
+goal: >
+  在 node-C 上用 SpatialStack geo 权重、仅 llava_hound_64k 跑 1 epoch MV-OPSD。
+  Teacher 看该条全部抽帧，Student 看一半（linspace，无 oracle 关键帧）。正式训练 wandb online。
+
+hypothesis: >
+  视频源没有 Frame-N / marker 关键帧；N→N/2 仍保留特权间隙。只相对本臂 step 0；
+  不可与 VLM-3R T8/S4（钉 0 + farthest 固定 4）当作同一 Student 规则对减。
+
+relations:
+  init_from: 20260909_spatialstack_qwen35_geo
+  protocol_copy: 20260915_spatialstack_mvopsd_vlm3r_t8_s4
+  student_rule: linspace_half_not_oracle_keys
+  engine: hf_generate
+  node: node-C
+
+environment:
+  conda_env: sr_opsd
+  nodes: [node-C]
+  gpus_per_node: 8
+  gpu_type: H20
+  ssh: "nodec / opsd3 as root; HOME=/home/c30084464"
+
+model:
+  backbone: Qwen3.5-4B + VGGT geometry fusion
+  model_path: output/spatialstack_qwen35_train
+  geometry_encoder: VGGT-1B
+  teacher: frozen
+  thinking: false
+
+design:
+  data_sources: [llava_hound_64k]
+  view_budget:
+    teacher: all_n_views
+    student: n_views_floor_div_2
+    student_rule: linspace(0, n, K, endpoint=False); n=8 -> [0,2,4,6]
+    skip_if_n_lt_2: true
+    keep_n_eq_4: true
+  source_plan: data/mvopsd/plan_single_llava_hound_64k/
+  builder: scripts/opsd/build_llava_hound_half_plans.py
+  parquet: data/mvopsd/parquet_llava_hound_half/main_train.parquet
+  train_rows: 37509
+  holdout_rows: 500
+  total_steps: 781   # floor(37509 / 48)
+  train_batch_size: 48
+  test_freq: 50
+  save_freq: 50
+  max_actor_ckpt_to_keep: 3
+  epochs: 1.0
+  shared_protocol:
+    - "ROLLOUT_NAME=hf"
+    - "lr 2e-6 / batch 48 / rollout.n=1 / frozen teacher"
+    - "teacher_enable_thinking=False"
+    - "VAL_FILE=vsibench_val_boxed_lastline_sub480.parquet"
+    - "VAL_DO_SAMPLE=0 greedy"
+    - "JUDGE=0"
+    - "WANDB_MODE=online project=MV-OPSD"
+    - "SMOKE=1 first then formal"
+
+wandb:
+  mode: online
+  project: MV-OPSD
+  run_name: 20260918_spatialstack_mvopsd_llava_hound_half
+  url: https://wandb.ai/slcheng/MV-OPSD/runs/fzal1dfu
+  run_id: fzal1dfu
+  smoke_mode: offline_greedy
+
+read_rules:
+  - "只相对本臂 step 0"
+  - "离线评测口径：lastline（SPAR 措辞，无 \\boxed{}）；不可与 geo boxed 66.59 对减"
+  - "不可与 VLM-3R T8/S4 钉 0 规则并列相减"
+  - "BLINK 不报残缺 14 宏平均；跳过 4 项 fusion 失败任务"
+
+training:
+  status: completed
+  entrypoint: scripts/opsd/launch_spatialstack_llava_hound_half.sh
+  command: >
+    setsid nohup env HOME=/home/c30084464 TOTAL_STEPS=781
+    bash scripts/opsd/launch_spatialstack_llava_hound_half.sh
+  parameters:
+    seed: 20260918
+    learning_rate: 2.0e-6
+    total_batch_size: 48
+    total_steps: 781
+    epochs: 1.0
+    rollout_name: hf
+  artifacts:
+    output_dir: checkpoints/20260918_spatialstack_mvopsd_llava_hound_half
+    checkpoint: checkpoints/20260918_spatialstack_mvopsd_llava_hound_half/global_step_781
+    train_log: logs/train/20260918_spatialstack_mvopsd_llava_hound_half/train_20260918_224826.log
+    nohup_log: logs/train/20260918_spatialstack_mvopsd_llava_hound_half/train.nohup.log
+    smoke_log: logs/train/20260918_spatialstack_mvopsd_llava_hound_half_smoke/train_20260918_223718.log
+  results:
+    metrics:
+      smoke_global_step: 2
+      smoke_policy_fallback_fraction: 0.0
+      smoke_teacher_image_swap_fraction: 1.0
+      smoke_teacher_probe: 0.08568
+      smoke_vopd_loss: 0.00291
+      smoke_privilege_bucket_half_frac: 1.0
+      smoke_view_selection: linspace_half
+      smoke_k_mix: "2:0.25 3:0.25 4:0.50"
+      smoke_val_smoke8_acc: 0.6667
+    summary: >
+      SMOKE=1 通过：step 2，vopd_loss 非零，fallback=0，linspace_half 全覆盖。
+      wandb atexit BrokenPipe 在 Final validation 之后，不影响通过。
+    failure_reason: ""
+
+evaluation:
+  status: completed
+  protocol: lastline
+  chain_pid: 1334212
+  wait_pid: 1332970
+  entrypoint: scripts/opsd/eval_llava_hound_half_last3_then_benches.sh
+  finished_at: "2026-09-19T16:38:09+08:00"
+  best_ckpt: 750
+  skip_blink_fusion:
+    - blink_art_style
+    - blink_functional_correspondence
+    - blink_semantic_correspondence
+    - blink_visual_correspondence
+  metrics:
+    vsi_lastline_700: 66.32
+    vsi_lastline_750: 66.53
+    vsi_lastline_781: 66.34
+    cv_lastline_750: 84.98
+    spar_lastline_750: 68.51
+    blink10_lastline:
+      counting: 50.00
+      forensic: 45.45
+      iq_test: 24.67
+      jigsaw: 53.33
+      MVR: 9.77
+      object_loc: 52.46
+      relative_depth: 81.45
+      relative_reflectance: 48.51
+      spatial_relation: 69.23
+      visual_similarity: 82.96
+    blink_spatial3_macro: 53.48
+    blink_macro_14: null
+
+issues:
+  - id: ISSUE-001
+    symptom: smoke 结束 wandb atexit BrokenPipeError
+    evidence: TaskRunner teardown_atexit after training/global_step:2 and Final validation
+    root_cause: wandb offline teardown 在 ray 退出时写 closed pipe
+    solution: 视为非失败；正式 run 用 WANDB_MODE=online
+    status: resolved
+    prevention: 以 global_step / vopd_loss / fallback 判 SMOKE，不以 wandb atexit rc
+
+handoff: "评测已于 16:38 收口。best 750：VSI 66.53 / CV 84.98 / SPAR 68.51；BLINK 10 项，不报 14 宏。node-C 空闲。"
+activity_log:
+  - "2026-09-18 22:30 UTC+8：registry 创建；Student = N/2 linspace，无关键帧。"
+  - "2026-09-18 22:36 UTC+8：plan 38009 全保留；parquet 37509 train / 500 holdout；TOTAL_STEPS=781。"
+  - "2026-09-18 22:46 UTC+8：SMOKE 通过 vopd_loss=0.00291 fallback=0。"
+  - "2026-09-18 22:48 UTC+8：正式训练启动 wandb fzal1dfu；eval 已 chain。"
+  - "2026-09-19 16:38 UTC+8：last3 lastline 完成；best step 750。"

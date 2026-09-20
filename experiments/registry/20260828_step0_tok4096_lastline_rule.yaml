@@ -1,0 +1,69 @@
+experiment_id: 20260828_step0_tok4096_lastline_rule
+title: "step0 基座离线重评：boxed_lastline + boxed_primary + 4096 + 规则层（JUDGE=0）"
+status: completed
+completed_at: "2026-08-28T12:40:00+08:00"
+parent: 20260827_mvopsd_vlm3r_epoch1_thinking
+
+created_at: "2026-08-28T12:15:00+08:00"
+owner: cursor-agent
+node: node-A
+driver_pid: 2842406
+
+goal: >
+  按当前规则层（闭合 \\boxed{} 只读框；无框只信 answer-is / 最后一行）给
+  训练 step 0 所用基座 Qwen3.5-4B 重新生成并打分。响应上限 4096。
+  解码与 8.27 训练内 val 一致：sample t=1.0 top_p=0.8。Prompt 用
+  boxed_lastline，与 8.27 的 boxed-only@1024 的 49.07 不可并列。
+
+model: models/Qwen3.5-4B
+
+protocol:
+  frames: 32
+  max_tokens: 4096
+  max_model_len: 32768
+  prompt_suffix: ' The final answer MUST BE put in \boxed{} on the last line of your response.'
+  boxed_primary: true
+  judge: 0
+  do_sample: true
+  temperature: 1.0
+  top_p: 0.8
+
+command: |
+  JUDGE=0 MAX_TOKENS=4096 MAX_MODEL_LEN=32768 \
+  DO_SAMPLE=1 TEMPERATURE=1.0 TOP_P=0.8 \
+  BOXED_PRIMARY=1 \
+  PROMPT_SUFFIX=' The final answer MUST BE put in \boxed{} on the last line of your response.' \
+  OUT_DIR=$PWD/logs/vsi_train_eval/Qwen3.5-4B/step0_tok4096_sample_boxed_lastline_rule \
+  bash scripts/opsd/run_training_vsibench_eval.sh --hf $PWD/models/Qwen3.5-4B
+
+outputs:
+  summary: logs/vsi_train_eval/Qwen3.5-4B/step0_tok4096_sample_boxed_lastline_rule/summary.json
+  samples: logs/vsi_train_eval/Qwen3.5-4B/step0_tok4096_sample_boxed_lastline_rule/samples.jsonl
+  driver_log: logs/eval/20260828_step0_tok4096_lastline_rule.log
+
+metrics:
+  overall: 47.05
+  answered_pct: 97.88
+  boxed_present_pct: 94.17
+  boxed_only_overall: 44.88
+  truncated_pct: 1.73
+  wall_minutes: 20.7
+  note: "与 8.27 in-loop step0 49.07 不可并列（prompt + parser + token cap 都变了）"
+
+rescore_parser_v2:
+  at: "2026-08-28T15:38:00+08:00"
+  outputs: logs/vsi_train_eval/Qwen3.5-4B/step0_tok4096_sample_boxed_lastline_rule/rescore_parser_v2/
+  overall: 46.51
+  answered_pct: 96.57
+  boxed_only_overall: 44.88
+  rows_changed: 69
+  delta_overall: -0.54
+  note: >
+    同一份 samples.jsonl，当前规则层（选择句含 would/I choose/so C；
+    不扫 T,L,B,S 裸字母；帧号枚举不当数值）。boxed_primary 仍开。
+    框内-only 不变 44.88。未重新生成。
+
+watch:
+  - "summary.json rule_only.overall（boxed_primary=true）"
+  - "truncated_pct；boxed.present_pct"
+  - "与 8.27 in-loop step0 49.07 不可并列（prompt + parser + token cap 都变了）"

@@ -1,0 +1,66 @@
+experiment_id: 20260903_qwen35base_vsibench_plain_rescore_boxed
+title: "基座 original-prompt dump，用 boxed last-line 解析重打分（不占卡）"
+status: completed
+completed_at: "2026-09-03T11:44:31+08:00"
+
+created_at: "2026-09-03T11:44:00+08:00"
+owner: cursor-window-mvopsd
+node: cpu-only
+
+goal: >
+  对 20260902 spatialstack_plain 生成（无 boxed 题面）用 boxed last-line 解析
+  再评一次：有闭合 \\boxed{} 只认框内，否则末行 answer_tail。不重新推理。
+
+protocol:
+  launcher: scripts/opsd/tools/rescore_vsibench_samples.py --boxed-primary
+  generation: reused
+  source_dump: logs/eval/20260902_qwen35base_vsibench_plain/vsibench/models__Qwen3.5-4B/20260902_221421_samples_vsibench.jsonl
+  VSIBENCH_PROTOCOL: spatialstack
+  VSIBENCH_BOXED_PRIMARY: "1"
+  boxed_primary: true
+  prompt_suffix: none (original generation)
+
+artifacts:
+  output_dir: logs/eval/20260902_qwen35base_vsibench_plain/rescore_boxed_lastline
+  summary: logs/eval/20260902_qwen35base_vsibench_plain/rescore_boxed_lastline/summary.json
+  samples: logs/eval/20260902_qwen35base_vsibench_plain/rescore_boxed_lastline/samples.jsonl
+
+results:
+  source_overall: 52.75
+  source_answered_pct: 98.13
+  rescore_overall: 52.75
+  rescore_answered_pct: 98.13
+  delta_overall: 0.00
+  rows_changed: 0
+  boxed_present: 0
+  box_only_overall: 0.00
+  by_question_type:
+    object_counting: 56.48
+    object_abs_distance: 36.89
+    object_size_estimation: 67.31
+    room_size_estimation: 54.13
+    object_rel_distance: 58.45
+    object_rel_direction: 55.74
+    route_planning: 35.05
+    obj_appearance_order: 57.93
+  reading: >
+    5,130 行闭合 \\boxed{} 为 0。boxed-primary 对无框行退回末行 answer_tail，
+    因此 overall 仍是 **52.75**，相对原 dump 0 行改判。box-only 诊断 0.00。
+    不能把这份重打分读成 48.06：那是带 boxed 后缀重新生成后再抽框。
+
+comparability:
+  do_not_mix:
+    - "离线 boxed last-line greedy 4096 重新生成（基座 48.06）"
+    - "无 boxed 源 dump 当时落盘 53.40"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-03T11:45:00+08:00"
+  current_task: "boxed last-line 解析重打分完成：52.75，与 original 生成相同"
+  owner: cursor-window-mvopsd
+  resources: ""
+  next_action: "若要得到 48 量级，必须换题面重新生成，不能只换解析"
+
+activity_log:
+  - at: "2026-09-03T11:44:31+08:00"
+    what: "--boxed-primary 跑完。boxed 0/5130；rule 52.75；相对原 dump Δ 0。"

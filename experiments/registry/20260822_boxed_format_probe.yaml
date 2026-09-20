@@ -1,0 +1,245 @@
+experiment_id: 20260822_boxed_format_probe
+title: "格式指令探针：冻结基座对 \\boxed{} 与 Answer: 的合规率、长度与分数代价"
+status: running  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-22T23:18:30+08:00"
+finished_at: null
+owner: "cursor-window-boxed-probe"
+node: node-A  # dsw-455344-95d655c8f-xm7dq，8×H20 独占
+
+goal: >
+  老师 2026-08-22 建议「为方便评测，让模型把答案放进 \boxed{}」，并给了
+  verl 的 verl/utils/reward_score/math_dapo.py 作为评分参考。
+  在把这条指令写进训练或评测协议之前，先测一件事：**冻结基座会不会照做**。
+  这不是可选的谨慎，而是本项目的损失结构决定的（见 upstream_check.why_it_matters）。
+
+upstream_check:
+  question: "老师给的这套代码，训练和测试都用了 \\boxed{} 吗？"
+  answer: >
+    分两条线，答案不同，而老师引的两样东西恰好来自这两条线。
+  geo3k_line:
+    where: "examples/data_preprocess/geo3k.py（verl 主仓，2026-08-22 拉取）"
+    verbatim_instruction: >
+      "You FIRST think about the reasoning process as an internal monologue and then
+      provide the final answer. The reasoning process MUST BE enclosed within tags.
+      The final answer MUST BE put in \boxed{}."
+    both_splits: >
+      是。该字符串由同一个 make_map_fn 施加到 train_dataset 与 test_dataset，
+      两个 split 的 prompt 逐字相同。老师那句话就是这里的第三句。
+    scoring: "verl/utils/reward_score/geo3k.py，boxed 是主路径（mathruler.extract_boxed_content）"
+    format_is_paid_for: >
+      **关键**：compute_score = 0.9 × acc(boxed) + 0.1 × format_reward，
+      format_reward = re.fullmatch(r"<think>.*</think>.*\\boxed\{.*\}.*")。
+      即格式合规本身带 0.1 的 reward，不是指望模型自觉。
+    not_directly_portable: >
+      该正则要求模型自己写出 <think>。我们的 student/评测模板是预闭合的
+      （'<think>\n\n</think>\n\n' 在生成开始前已写死），模型物理上写不出 <think>，
+      这条 format_reward 对我们恒为 0。照抄会得到一个永远拿不到的格式分。
+  dapo_line:
+    where: "verl/utils/reward_score/math_dapo.py（老师给的链接，本地 verl_pkg 同版）"
+    boxed_is_fallback: >
+      **不是主路径**。verl/utils/reward_score/__init__.py:59-62 调用
+      math_dapo.compute_score(solution_str, ground_truth)，未传 strict_box_verify，
+      走默认 False；verify() 于是调 is_correct_minerva，其 answer_pattern 是
+      r"(?i)Answer\s*:\s*([^\n]+)"。\boxed{} 只在 strict_box_verify=True
+      时经 is_correct_strict_box 生效，而 verl 自己的路由从不传这个参数。
+    length_is_penalised: >
+      DAPO 的 run 脚本（verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_8_8.sh）
+      带 enable_overlong_buffer=True、overlong_buffer_len=4096、
+      overlong_penalty_factor=1.0、max_resp_len=8192。DAPORewardManager 对进入
+      最后 4096 token 缓冲区的回答按 -exceed_len/buffer_len × factor 线性扣分，
+      撞满预算扣满 -1.0（上游单测 tests/workers/reward_manager/test_dapo_on_cpu.py::
+      test_call_with_overlong_buffer_enabled_applies_penalty 就是验这个）。
+      即 DAPO 论文的 Overlong Reward Shaping。
+    truncation_caveat: >
+      compute_score 先取 solution_str[-300:]（注释写明「MATH-500 最长答案 159 字符」），
+      is_correct_strict_box 再取 pred[-100:]。对我们撞满 1024 token 的退化回答，
+      这个窗口会把「答了又继续胡说」记成完全没答。本项目的 extract_boxed 因此不设窗口。
+  train_eval_share_scorer: >
+    在 verl 里训练与验证共用判分器是结构性的：verl/trainer/main_ppo.py:347-355
+    两侧都从同一个 load_reward_manager 构造，只差 num_examine（打印几条样本）。
+  why_it_matters: >
+    两条参考线各自都有一个「让格式站住」的机制——geo3k 给格式付 0.1 reward，
+    DAPO 给超长扣分。**我们两样都没有**：mvopsd.yaml 走 policy_loss.loss_mode=vopd，
+    dp_actor.py:1137-1139 在 policy_fallback_mask 恒空时执行 pg_loss = vopd_loss，
+    回路里没有任何 reward 项（LESSON-012）。
+    所以一句 prompt 指令能不能撑住格式，完全取决于 teacher 的分布会不会照做，
+    这是必须先测的量，不能假定。
+
+hypothesis: >
+  可检验表述：若基座对格式指令有可用的合规率（先验判据 >=80%，且不以答案质量为代价），
+  则 \boxed{} 可以作为评测协议的诚实性改进被采纳——它把「没答」与「答错」分开，
+  修掉 LESSON-018 那个「读不出数字」与「数字答得极差」同形的问题。
+  若合规率低（<50%）或合规以缩短/劣化答案为代价，则这条指令在**无 reward 的
+  VOPD 回路里不会自动成立**，要么需要显式的格式项（geo3k 路线），要么需要
+  长度惩罚（DAPO 路线），此时它是一个方法改动而不是评测便利。
+
+  注意本轮**不能**回答「加了 boxed 能不能治住 length explosion」——
+  探针测的是冻结基座，而 explosion 发生在训练过程中。本轮只定「指令是否被听懂」。
+
+design:
+  model: "./models/Qwen3.5-4B（冻结基座，与所有 anchor 同一份权重）"
+  arms:
+    plain:
+      suffix: ""
+      role: >
+        对照 + 闸门。不加任何后缀，prompt 与已归档运行逐字相同，因此
+        pool_plain 必须能复现 logs/eval/teacher_reliability/as_trained 的回答；
+        复现不了说明环境动了，任何臂间差异都不能归因到 prompt（LESSON-010）。
+        同时给出「不被要求时自发写 boxed 的比例」这个基线。
+    boxed:
+      suffix: " The final answer MUST BE put in \\boxed{}."
+      provenance: >
+        verl geo3k 指令的第三句，逐字。**故意删掉**前两句
+        （"You FIRST think about the reasoning process..." / "The reasoning process
+        MUST BE enclosed within tags."）：我们的模板已预闭合 <think>，
+        保留那两句是在要求模型做它做不到的事，且「先写内心独白」本身在鼓励写长，
+        而写长正是本项目当前要消除的失效（LESSON-025）。
+    answer:
+      suffix: "\\nRemember to put your answer on its own line after \"Answer:\"."
+      provenance: >
+        **本项目措辞，不是 DAPO 数据集原文**（DAPO-Math-17k 的 card 未取到，
+        2026-08-22 两次拉取超时）。措辞按 math_dapo.is_correct_minerva 的
+        answer_pattern r"(?i)Answer\s*:\s*([^\n]+)" 反推，使「合规」等于
+        「verl 实际会运行的那个判分器能读到」。此项为 待核对。
+      rationale: >
+        用户 2026-08-22 决定两种格式都测。理由：LaTeX 对一个非数学基座未必自然，
+        而 Answer: 才是 math_dapo 默认走的路径，多一条臂就能知道哪种更被听懂。
+  question_sets:
+    pool:
+      what: "训练池，teacher 协议（无 system 轮、原尺寸图、enable_thinking=False）"
+      parquet: data/mvopsd/parquet/main_train.parquet
+      rows: 3000
+      seed: 20260820
+      pairing: >
+        row_index 在抽样之前赋值（teacher_eval_core.load_rows:110-115），
+        所以三条臂抽到同一批行，且每行都能在归档全量 dump 里查到，天然配对。
+      caveat: >
+        池里约四分之一是 llava_hound 的开放式描述题（"谁在沙滩上加入了那个光头男人"），
+        对这类题要求 \boxed{} 本身没有意义。**统一施加**是为了测量干净，
+        但合规率必须按数据源分开报，不能只看总数。
+    vsi:
+      what: "VSI-Bench 全量 5,130 题，32 帧，1024 token，greedy"
+      why_both: >
+        VSI-Bench 是上报指标，训练池才是蒸馏时 teacher 实际被问的东西，
+        两者 prompt 结构不同（有无 system 轮、图像几何），合规率不能互相外推。
+
+protocol:
+  code:
+    driver: scripts/opsd/run_boxed_probe.sh
+    vsi_core: scripts/opsd/vsibench_eval_core.py  # 新增 prompt_suffix 与 boxed 诊断列
+    pool_core: scripts/opsd/teacher_eval_core.py  # 新增 prompt_suffix
+    extractor: scripts/opsd/vsibench_scoring.py   # 新增 extract_boxed / normalize_boxed
+    summary: scripts/opsd/tools/summarize_boxed_probe.py
+    tests: [scripts/opsd/tests/test_boxed_extraction.py]
+  scoring_unchanged: >
+    判分口径一行未动。boxed 是**并行的诊断列**：boxed_present / boxed_content /
+    boxed_answered / boxed_score 逐行落盘，boxed_score 是「若只有框里算数」这一行会得多少分。
+    上报的 VSI-Bench 数字仍由既有解析器与既有指标产出（LESSON-013：默认对齐上游，
+    本项目改动一律做成显式开关；prompt_suffix 默认空串）。
+  boxed_extraction:
+    method: "花括号配平扫描，取最后一个闭合的 \\boxed{...}"
+    ported_from: "verl math_dapo.last_boxed_only_string"
+    two_departures:
+      - "不设尾部窗口。上游只看最后 300/100 字符，对我们「答了又继续刷满预算」的退化回答会记成没答。"
+      - "只返回字符串，不返回判定。评分仍走本项目的按题型指标（六个 MCA exact match、
+         四个 NA 用 MRA:.5:.95:.05）。上游 compute_score 是二值的，把数值题路由进去
+         会把连续指标压成二元却仍顶着 MRA 的名字上报（LESSON-019）。"
+  environment_pinned: >
+    两侧都显式 unset PYTHONNOUSERSITE / PYTHONPATH，并把解析到的版本打进 env.log。
+    起因见 issues ISSUE-401。实测 pool 臂 transformers 5.5.0（~/.local）+ vLLM 0.18.0。
+
+acceptance:
+  gate: "pool_plain 与归档 as_trained 在共享行上的逐字复现率"
+  primary: "boxed / Answer: 合规率（总体 + 按数据源 + 按 VSI 题型）"
+  must_report_together:
+    - "回答长度中位数与 p95（合规不能以缩短答案为代价）"
+    - "撞满预算比例"
+    - "rule-tier 分数与作答率（LESSON-011：先看形态再看分数）"
+    - "plain 臂的自发 boxed 率（不被要求时的基线）"
+
+issues:
+  - id: ISSUE-401
+    symptom: "驱动首次启动，pool_plain 秒退：ModuleNotFoundError: No module named 'transformers'"
+    evidence: >
+      logs/eval/boxed_probe/pool_plain/run.log 首次运行栈顶为
+      teacher_eval_core.py:216 from transformers import AutoProcessor；
+      /usr/bin/python3 -c "import site; print(site.ENABLE_USER_SITE)" 为 False，
+      而 transformers 确实在 /home/c30084464/.local/lib/python3.12/site-packages/。
+    root_cause: >
+      调用方 shell 带着 PYTHONNOUSERSITE=1，禁用了 user site。
+      而训练环境正是「系统 python3.12 + ~/.local」（LESSON-007），于是整个环境不可见。
+      不是仓库问题，是环境泄漏；但无人值守的链式作业不应假设继承来的环境可用。
+    second_finding: >
+      顺带查出更隐蔽的一条：该变量还决定 conda sr_opsd 里**用哪个** transformers。
+      设置时解析到 conda 自带 5.3.0，不设置时被 ~/.local 的 5.5.0 盖住。
+      历史归档数字都是在普通人工窗口（未设置）下跑的，即实际用的是 5.5.0。
+      也就是说图像预处理版本此前一直取决于「谁启动了作业」。
+    solution: >
+      run_boxed_probe.sh 顶部显式 unset PYTHONNOUSERSITE / PYTHONPATH，
+      两条臂各加一次 import 探针并把版本写进 env.log，失败立即以 rc=90 退出。
+    status: resolved
+    prevention: >
+      环境相关的量要么固定要么打印，不能继承。链式脚本的 import 探针要连
+      **版本与路径**一起打印，只探「能不能 import」抓不到版本被 user site 遮蔽这种情况。
+
+  - id: ISSUE-402
+    symptom: >
+      给 boxed 路径加金标自洽测试时，\boxed{30.9\,\text{m}^2} 判 0 分
+      （room_size_estimation 金标 30.9）。
+    evidence: >
+      vsibench_scoring._NUMBER_RE.findall(r"30.9\,\text{m}^2") 返回 ['30.9', '2']，
+      而数值兜底取「最后一行的最后一个数字」，于是读成 2.0。
+      \frac{1}{2} 同理读成 2.0，12 cm^3 读成 3.0。
+    root_cause: >
+      LaTeX 指数的数字被当成了数量。这与 Frame-4 读成 -4（LESSON-023 / ISSUE-T06）
+      是同一类：前瞻/后顾没有界定「这个数字串是不是一个量」。
+      **且这次的干扰串是我们自己即将要求的格式引入的**——要求 \boxed{} 就是在邀请 LaTeX，
+      而四个数值题型里两个的单位是面积和体积。
+    solution: >
+      _NUMBER_RE 后顾增加 (?<!\^)(?<!\^\{)：紧跟 ^ 或 ^{ 的数字是指数，永不是数量。
+      另加 normalize_boxed()，**只作用于框内内容**（框内每个字符都属于答案，
+      去装饰无风险）：拆 \text/\mathrm/\textbf 包装、去 \, \; \! 间距宏与 $、
+      \frac{a}{b} 化为商。
+      未采纳上游 math_dapo.normalize_final_answer 的替换表：它按 MATH-500 见过的
+      字面量手工维护（REMOVED_EXPRESSIONS 里列着 "\\text{}^2"、"\\text{}^3"、
+      "cm"、"meters"、"square"），覆盖 ^2/^3 而不覆盖 ^4，且依赖前置替换先把
+      \text{m} 改写掉。按结构匹配不需要知道 benchmark 用哪些单位。
+    impact_on_published_numbers: >
+      **这个修正不是零影响**，且它修的是一个**先于 boxed 就存在**的 bug——
+      模型本来就在自发写 \text{m}^2。57.6869 万条归档回答回放，518 条读数改变，
+      方向全部向上（旧读指数、新读真值）：
+        as_trained    165/124,306 (0.133%)  总分 +0.052 pp  改判行均分 0.054 -> 0.445
+        sweep_spar32  299/ 20,000 (1.495%)  总分 +0.383 pp  改判行均分 0.009 -> 0.265
+        sweep_vlm3r    51/ 20,000 (0.255%)  总分 +0.111 pp  改判行均分 0.000 -> 0.435
+        VSI 验证 dump   2 行，聚合后无可测变化
+      即 teacher 可靠性 41.4% -> 约 41.45%，两条视角扫描曲线整体上移 0.1~0.4 pp，
+      **没有任何一条已发布结论翻转**（8→32 视角边际递减、spar32 空间想象题近零分等均不变）。
+      作答率变化恒为 0.0000 pp——旧解析器确实读出了一个数字，只是读错了，
+      这正是 LESSON-018 那个「读错数与答得差同形」的形态。
+    status: resolved
+    prevention: >
+      新增判分格式之前，先把该格式会引入的字符串写成测试：LaTeX 指数 ^2/^{2}、
+      单位包装 \text{}/\mathrm{}、间距宏 \,、定界符 $、分数 \frac{}{}。
+      并且金标自洽测试要跑全量（本次 5,130 条全过）而不是抽样。
+
+handoff: >
+  2026-08-22 23:18 node-A 启动 6 条臂（pool 3 条 × 3,000 行，vsi 3 条 × 5,130 题），
+  驱动 scripts/opsd/run_boxed_probe.sh，状态见 logs/eval/boxed_probe/status.txt。
+  预计 pool 每条约 7 min、vsi 每条约 20 min，合计约 1.4 h。
+  跑完执行 python3 scripts/opsd/tools/summarize_boxed_probe.py。
+  **先看闸门**：pool_plain 对归档的逐字复现率；不通过则臂间差异不可归因。
+
+activity_log:
+  - at: "2026-08-22T22:40:00+08:00"
+    what: "核对老师给的 math_dapo.py：确认 boxed 在该文件默认路径下只是兜底，
+           Answer: 才是主路径；那句 boxed 指令实际出自 geo3k 数据预处理，
+           且 geo3k 训练/测试两个 split 逐字共用同一句。"
+  - at: "2026-08-22T23:00:00+08:00"
+    what: "两侧评测核心加 prompt_suffix（默认空串）；vsibench_eval_core 加 boxed 诊断列；
+           新增 test_boxed_extraction.py（全量 5,130 金标自洽 + Frame-N 干扰串）。"
+  - at: "2026-08-22T23:10:00+08:00"
+    what: "测试抓到 ISSUE-402（LaTeX 指数）；修 _NUMBER_RE 并回放 57.7 万条归档回答量化影响。
+           既有四套回归（vsibench protocol / spar / teacher / val invariance）全过。"
+  - at: "2026-08-22T23:18:30+08:00"
+    what: "ISSUE-401 修复后重启驱动，pool_plain 开始生成。"

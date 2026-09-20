@@ -1,0 +1,29 @@
+experiment_id: 20260828_val_resp4096_smoke
+title: "Smoke: in-loop val response_length=4096（run_mvopsd.sh 修复验证）"
+status: completed
+parent: 20260827_mvopsd_vlm3r_epoch1_thinking
+
+created_at: "2026-08-28T10:34:00+08:00"
+owner: cursor-agent
+node: node-A
+
+goal: >
+  验证 run_mvopsd.sh 将 VAL_MAX_RESPONSE_LENGTH=4096 与训练 MAX_RESPONSE_LENGTH=1024
+  分离后，Hydra 最终配置与 val dump 的 resp_tokens 上限正确。
+
+command: |
+  SMOKE=1 WANDB_MODE=offline \
+  EXPERIMENT_NAME=20260828_val_resp4096_smoke \
+  TRAIN_FILE=$PWD/data/mvopsd/parquet_single_vlm3r_scannet/main_train.parquet \
+  SMOKE_VAL_FILE=$PWD/data/eval/vsibench_verl/vsibench_val_boxed_smoke64.parquet \
+  VSI_EVAL=1 JUDGE=0 \
+  bash scripts/opsd/run_mvopsd.sh main
+
+pass_criteria:
+  - "driver.log: val_kwargs.response_length=4096"
+  - "driver.log: max_model_len=15360 (11264+4096)"
+  - "logs/val/.../0.jsonl: resp_tokens max 可 >1024 或 clip 按 4096 计"
+
+outputs:
+  train_log: logs/train/20260828_val_resp4096_smoke/
+  val_dump: logs/val/20260828_val_resp4096_smoke/

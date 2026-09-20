@@ -1,0 +1,87 @@
+experiment_id: 20260908_sparbench_vllm_boxed
+title: "SPAR-Bench boxed last-line：vLLM greedy @2048，基座 vs SPAR3 K=1 step 55"
+status: completed
+created_at: "2026-09-08T20:25:00+08:00"
+completed_at: "2026-09-08T22:29:11+08:00"
+owner: cursor-window-mvopsd
+
+goal: >
+  用户要求 SPAR-Bench 也跑 boxed。题面后缀与 VSI/CV boxed 相同
+  （BOXED_LASTLINE_SUFFIX），解析 boxed-primary（有闭合框只认框内，否则末行）。
+  引擎与 lastline 39.72/42.16 相同（vLLM TP=8 greedy @2048），不可与 lastline 并列相减。
+
+environment:
+  conda_env: sr_opsd
+  nodes: node-A
+  gpus_per_node: 8
+  gpu_type: H20
+  note: "node-B GPU0 occupied (~34 GiB); serial on node-A only"
+
+models:
+  base: models/Qwen3.5-4B
+  spar3: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+
+evaluation:
+  status: completed
+  entrypoint: scripts/opsd/run_sparbench_vllm_boxed_chain.sh
+  command: >
+    setsid nohup bash scripts/opsd/run_sparbench_vllm_boxed_chain.sh
+    > logs/eval/20260908_sparbench_vllm_boxed/driver.log 2>&1
+  parameters:
+    prompt_suffix: " The final answer MUST BE put in \\boxed{} on the last line of your response."
+    parser: boxed-primary
+    decoding: greedy
+    max_tokens: 2048
+    max_model_len: 16384
+    engine: vLLM TP=8
+    disable_thinking: true
+  artifacts:
+    eval_root: logs/eval/20260908_sparbench_vllm_boxed
+    base_summary: logs/eval/20260908_sparbench_vllm_boxed/spar_base_boxed/summary.json
+    spar3_summary: logs/eval/20260908_sparbench_vllm_boxed/spar_spar3_boxed/summary.json
+  metrics:
+    base: 40.19
+    spar3: 42.65
+    delta: 2.46
+    base_truncated_pct: 17.57
+    spar3_truncated_pct: 3.36
+    base_boxed_present_pct: 82.5
+    spar3_boxed_present_pct: 94.97
+    base_median_tokens: 411
+    spar3_median_tokens: 306
+    base_mca: 41.87
+    spar3_mca: 45.20
+    base_na: 40.85
+    spar3_na: 41.93
+    base_vci: 19.49
+    spar3_vci: 21.34
+    elapsed_sec: [4104.7, 2911.4]
+
+comparability:
+  do_not_mix:
+    - "20260906 SPAR lastline vLLM 39.72 / 42.16"
+    - "20260902 SPAR-Bench HF official 39.88 / 13.87"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-08T22:40:00+08:00"
+  current_task: "对照表 SPAR 节已写入 boxed 行"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: "node-A 8×H20 idle"
+  blocker: ""
+  next_action: ""
+
+issues: []
+activity_log:
+  - at: "2026-09-08T22:40:00+08:00"
+    what: >
+      完成。boxed vLLM greedy @2048：基座 40.19 / SPAR3 42.65（+2.46）。
+      截断 17.57% / 3.36%；框合规 82.5% / 95.0%。对照表已写入。
+      与 lastline 39.72/42.16（+2.44）方向同、不可并列相减。
+  - at: "2026-09-08T22:29:11+08:00"
+    what: "SPAR3 rc=0；ALL DONE。"
+  - at: "2026-09-08T21:38:38+08:00"
+    what: "基座 rc=0，overall 40.19。"
+  - at: "2026-09-08T20:25:00+08:00"
+    what: "登记并启动 boxed 协议；node-B 有占用故只跑 node-A。"

@@ -1,0 +1,213 @@
+experiment_id: 20260915_spatialstack_mvopsd_spar_t32_s16
+title: "SpatialStack SPAR 全量 MV-OPSD：Teacher 32 / Student 16（必含关键帧）"
+status: running
+
+created_at: "2026-09-15T15:52:00+08:00"
+started_at: "2026-09-16T13:35:59+08:00"
+driver_pid: 3521557
+train_pgid: 3521496
+train_log: logs/train/20260915_spatialstack_mvopsd_spar_t32_s16/train_20260916_133559.log
+finished_at: null
+owner: cursor-window-spatialstack
+
+goal: >
+  在 SpatialStack geo 权重上，对 SPAR 全量（spar_3view + spar_32view）跑 1 epoch
+  MV-OPSD。32-view 题 Teacher 看满 32 帧、Student 看 16 帧且必含 oracle 关键帧；
+  3-view 题相册不够，Teacher=3 / Student=3。正式训练 wandb online 记曲线。
+
+hypothesis: >
+  spar32 上 Teacher 全相册正确率与关键帧接近（20260914 Δ −0.62pp），Student 16
+  帧钉住关键帧后应保留 32→K 的特权间隙。合池约 62% 为 3-view 且 N/K=1，整体
+  VSI 曲线会被稀释；32-view 子集才回答本假设。
+
+relations:
+  init_from: 20260909_spatialstack_qwen35_geo
+  follows:
+    - 20260914_teacher_keyframe_probe
+    - 20260914_teacher_key_plus_probe
+    - 20260829_mvopsd_spar_all_epoch1_nothink
+  engine: hf_generate
+
+code:
+  git_commit: null
+  git_dirty: null
+
+environment:
+  conda_env: sr_opsd
+  nodes: [node-A]
+  gpus_per_node: 8
+  gpu_type: H20
+
+model:
+  backbone: Qwen3.5-4B + VGGT geometry fusion
+  model_path: output/spatialstack_qwen35_train
+  geometry_encoder: VGGT-1B
+  geometry_encoder_path: models/VGGT-1B
+  teacher: frozen
+  thinking: false
+
+design:
+  data_sources: [spar_3view, spar_32view]
+  view_budget:
+    spar_32view:
+      teacher: 32
+      student: 16
+      student_rule: required_views union farthest-point extras; empty required pins frame 0
+    spar_3view:
+      teacher: 3
+      student: 3
+      note: "N/K=1; no view privilege"
+  source_plans:
+    spar_3view: data/mvopsd/plan_single_spar_3view/
+    spar_32view: data/mvopsd/plan_single_spar_32view/
+  note: >
+    plan_single_spar_32view 的 teacher_view_indices 仍是 cap-8；本轮 builder 重置为
+    range(32) 并用原始 body 作为 teacher_body。不要复用 plan_spar_all。
+  builder: scripts/opsd/build_spar_t32_s16_plans.py
+  parquet: data/mvopsd/parquet_spar_t32_s16/main_train.parquet
+  train_rows: 54495
+  holdout_rows: 1000
+  train_by_source: {spar_3view: 33970, spar_32view: 20525}
+  total_steps: 1135   # floor(54495 / 48)
+  epochs: 1.0
+  train_batch_size: 48
+  test_freq: 50
+  save_freq: 50
+  max_actor_ckpt_to_keep: 3
+  shared_protocol:
+    - "ROLLOUT_NAME=hf"
+    - "lr 2e-6 / batch 48 / rollout.n=1 / frozen teacher"
+    - "teacher_enable_thinking=False"
+    - "VAL_FILE=vsibench_val_boxed_lastline_sub480.parquet"
+    - "VAL_DO_SAMPLE=0 greedy (rerun 2026-09-16; sample run aborted)"
+    - "JUDGE=0"
+    - "WANDB_MODE=online project=MV-OPSD"
+
+wandb:
+  mode: online
+  project: MV-OPSD
+  run_name: 20260915_spatialstack_mvopsd_spar_t32_s16
+  url: https://wandb.ai/slcheng/MV-OPSD/runs/9ipc8ihl
+  run_id: 9ipc8ihl
+  prior_sample_run: https://wandb.ai/slcheng/MV-OPSD/runs/02lqzpd7
+  smoke_mode: offline_greedy_20260916
+
+read_rules:
+  - "只相对本臂 step 0"
+  - "全量离线 VSI boxed @4096 才可对 geo 66.59"
+  - "不可与 20260831 vLLM SPAR3 或 20260829 Teacher-cap-8 合池并列相减"
+  - "合池分数被 3-view N/K=1 稀释；分源看 k_views_student 16 的步"
+
+training:
+  status: running
+  entrypoint: scripts/opsd/launch_spatialstack_spar_t32_s16.sh
+  command: |
+    setsid nohup bash scripts/opsd/launch_spatialstack_spar_t32_s16.sh
+      > logs/train/20260915_spatialstack_mvopsd_spar_t32_s16/train_greedy.nohup.log 2>&1
+  parameters:
+    seed: 20260915
+    learning_rate: 2.0e-6
+    total_batch_size: 48
+    epochs: 1.0
+  artifacts:
+    output_dir: checkpoints/20260915_spatialstack_mvopsd_spar_t32_s16
+    checkpoint: ""
+    train_log: logs/train/20260915_spatialstack_mvopsd_spar_t32_s16/train_20260916_133559.log
+    sample_run_ckpt: checkpoints/20260915_spatialstack_mvopsd_spar_t32_s16_valsample_aborted_20260916
+    deleted_on: "2026-09-18T10:39:00+08:00"
+    deleted_note: "user requested rm of node-A checkpoints/ and output/; FSDP and HF merge gone"
+  results:
+    metrics:
+      step0_val_sub480_acc: 0.6370
+      step1_vopd_loss: 1.0768e-4
+      step1_policy_fallback_fraction: 0.0
+      step1_teacher_image_swap_fraction: 1.0
+      teacher_probe: 0.08567959070205688
+    summary: "sample 轮已中止；greedy 重跑中。旧 step0 sample 63.70% 不可与本轮 greedy 并列。"
+    failure_reason: ""
+
+evaluation:
+  status: queued
+  entrypoint: scripts/opsd/eval_after_spar_t32_s16.sh
+  command: |
+    bash scripts/opsd/tools/chain_after.sh 3521557 40000 --
+      bash scripts/opsd/eval_after_spar_t32_s16.sh
+  benchmarks: [vsibench]
+  parameters:
+    in_loop: vsibench_val_boxed_lastline_sub480.parquet
+    in_loop_step0_acc: null
+    in_loop_decoding: greedy
+    offline: vsibench 5130 boxed @4096
+  artifacts:
+    eval_root: logs/eval/20260915_spatialstack_mvopsd_spar_t32_s16
+  results:
+    metrics:
+      step0_sub480_acc_sample_aborted: 0.6370
+    summary: "等待 greedy 重跑；sample 曲线不可用"
+    failure_reason: ""
+
+handoff:
+  current_phase: artifacts_deleted
+  last_updated: "2026-09-18T10:39:00+08:00"
+  current_task: "node-A checkpoints/ and output/ emptied per user; GPU idle"
+  owner: cursor-window-spatialstack
+  active_job_id: {}
+  resources: "node-A 8×H20 idle"
+  blocker: "FSDP ckpts and HF merges deleted on node-A; cannot resume or eval from local weights"
+  next_action: >
+    本机权重已清空。若仍要 SPAR 评测需从别处恢复或重训。
+
+issues:
+  - id: ISSUE-001
+    status: mitigated
+    phase: training
+    discovered_at: "2026-09-15T16:08:58+08:00"
+    symptom: "未先 SMOKE=1，直接拉起 1135 步正式 run"
+    evidence: "smoke.nohup.log 开头 steps=1135 wandb=online"
+    root_cause: "启动命令漏了 SMOKE=1"
+    solution: >
+      未杀进程。val_before_train + step 1–8 已通过闸门（几何类、fallback=0、swap=1、
+      T32/S16 批次构成、vopd_loss 非零、teacher_probe 恒定）。batch 48 未 OOM。
+    prevention: "正式 nohup 前先 SMOKE=1 或 DRY_RUN=1 核对 EXPERIMENT_NAME/_smoke"
+  - id: ISSUE-002
+    status: resolved
+    phase: training
+    discovered_at: "2026-09-16T13:25:00+08:00"
+    symptom: "sample val (t=1.0 top_p=0.8) 使 SPAR/VLM step 0 8类 macro 不可比"
+    evidence: "同一 sub480、同一 geo 权重，macro 63.70 vs 61.59；micro 64.21 vs 64.33"
+    root_cause: "HF sample 跨机不复现；小类等权放大噪声"
+    solution: >
+      用户要求停 sample 轮（SPAR 约 step 950）并 greedy 重跑。ckpt 归档
+      checkpoints/20260915_spatialstack_mvopsd_spar_t32_s16_valsample_aborted_20260916。
+      冒烟 smoke8 greedy step0 两边均为 0.6417。
+    prevention: "要对齐两臂 step 0 必须 greedy；sample 曲线不得并列"
+
+activity_log:
+  - at: "2026-09-15T15:52:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "created registry for SPAR T32/S16 SpatialStack MV-OPSD"
+    result: "status=planned"
+  - at: "2026-09-15T16:04:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "built plan+parquet 55495/54495+1000; student max 3339; teacher max 6540"
+    result: "n_views_teacher {3:33970,32:20525} k {3:33970,16:20525}"
+  - at: "2026-09-15T16:08:58+08:00"
+    actor: cursor-window-spatialstack
+    action: "launched formal 1135-step run (WANDB_MODE=online) on node-A 8 GPU"
+    result: "pid 2164694 wandb 02lqzpd7"
+  - at: "2026-09-15T16:33:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "step 0 val + steps 1–8 healthy"
+    result: "sub480 acc 0.6370; fallback 0; T32/S16 mix present; ~72s/step"
+  - at: "2026-09-16T13:25:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "user stop sample run (~step 950) for greedy val rerun"
+    result: "ckpt archived; smoke8 greedy 0.6417 both nodes; wandb 9ipc8ihl PID 3521557"
+  - at: "2026-09-18T10:39:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "user delete node-A checkpoints/ and output/"
+    result: "dirs emptied and recreated; disk 3.1T→1.7T used, 1.4T→2.8T free"
+
+notes:
+  conclusion: ""
+  next_step: "local SPAR/SFT weights deleted; recover from other node or retrain if needed"

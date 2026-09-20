@@ -1,0 +1,120 @@
+experiment_id: 20260908_blink_full_vllm
+title: "BLINK 全量 14 任务 vLLM：基座 vs SPAR3 K=1 step 55，original + boxed last-line greedy @1024"
+status: completed
+created_at: "2026-09-08T12:55:00+08:00"
+completed_at: "2026-09-08T13:34:23+08:00"
+owner: cursor-window-mvopsd
+node: node-A
+
+goal: >
+  补齐 BLINK 官方 14 子任务 val 全量。引擎 vLLM TP=8 greedy @1024，
+  基座与 SPAR3 K=1 step 55 各跑 original 与 spatialstack（boxed last-line）。
+  不可与 HF/lmms-eval 的 blink_spatial 75.30 / 13.05 / 65.99 / 68.92 并列。
+
+models:
+  base: models/Qwen3.5-4B
+  spar3: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+
+protocol:
+  launcher: scripts/opsd/run_blink_full_vllm_chain.sh
+  harness: scripts/opsd/tools/eval_blink_vllm.py
+  python: conda sr_opsd
+  split: val
+  n_expected: 1901
+  n_tasks: 14
+  aggregate: "14-task blink_acc macro (weight_by_size=False)"
+  decoding: greedy
+  max_tokens: 1024
+  max_model_len: 16384
+  tensor_parallel_size: 8
+  disable_thinking: true
+  data_source: >
+    cache/datasets/BLINK-Benchmark__BLINK；缺失 11 个配置从 ModelScope
+    evalscope/BLINK parquet 转存。huggingface.co xethub 不可达。
+
+arms:
+  base_original:
+    protocol: original
+    output_root: logs/eval/20260908_blink_full_vllm/base_original
+    summary_json: logs/eval/20260908_blink_full_vllm/base_original/summary.json
+    status: done
+    overall: 64.82
+    spatial_macro: 75.80
+    answered_pct: 100.0
+    truncated_pct: 0.0
+  spar3_original:
+    protocol: original
+    output_root: logs/eval/20260908_blink_full_vllm/spar3_original
+    summary_json: logs/eval/20260908_blink_full_vllm/spar3_original/summary.json
+    status: done
+    overall: 4.10
+    spatial_macro: 13.29
+    answered_pct: 100.0
+    truncated_pct: 5.0
+    delta_vs_base: -60.72
+  base_spatialstack:
+    protocol: spatialstack
+    output_root: logs/eval/20260908_blink_full_vllm/base_spatialstack
+    summary_json: logs/eval/20260908_blink_full_vllm/base_spatialstack/summary.json
+    status: done
+    overall: 62.67
+    spatial_macro: 64.02
+    answered_pct: 91.32
+    truncated_pct: 9.36
+  spar3_spatialstack:
+    protocol: spatialstack
+    output_root: logs/eval/20260908_blink_full_vllm/spar3_spatialstack
+    summary_json: logs/eval/20260908_blink_full_vllm/spar3_spatialstack/summary.json
+    status: done
+    overall: 63.66
+    spatial_macro: 69.37
+    answered_pct: 94.21
+    truncated_pct: 5.94
+    delta_vs_base: 0.99
+
+comparability:
+  do_not_mix:
+    - "20260902 HF/lmms-eval blink_spatial original 75.30 / 13.05"
+    - "20260902 HF/lmms-eval blink_spatial spatialstack 65.99 / 68.92"
+    - "original vs spatialstack"
+    - "vLLM spatial-3 64.02/69.37 vs HF spatial 65.99/68.92"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-08T13:35:00+08:00"
+  current_task: "四臂 rc=0；对照表已加 vLLM 全量表"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: ""
+
+issues:
+  - id: ISSUE-001
+    at: "2026-09-08T13:03:06+08:00"
+    symptom: >
+      spar3_original 在 base_original 结束后 17s 以 rc=135（Bus error）退出，
+      run.log 为空。
+    evidence: logs/eval/20260908_blink_full_vllm/driver.log
+    root_cause: >
+      上一臂 vLLM/NCCL Destroy COMPLETE 后立刻再起 TP=8；同时 harness 在建引擎前
+      对 1901 行全部解码图像。
+    solution: >
+      臂间 sleep 20 + 再次 wait_gpus_free；启动前不再预解码全库，limit_mm=8。
+    status: resolved
+    prevention: >
+      串行 vLLM 臂之间必须等显存真正空且再留缓冲，不要在 Destroy COMPLETE 当秒重启。
+
+activity_log:
+  - at: "2026-09-08T13:34:23+08:00"
+    what: >
+      ALL DONE。boxed 62.67 / 63.66（+0.99）；original 64.82 / 4.10。
+      8 卡已释放。对照表已更新。
+  - at: "2026-09-08T13:05:00+08:00"
+    what: >
+      base_original 完成 overall 64.82 / spatial_macro 75.80 / 截断 0。
+      spar3_original SIGBUS；修 chain 后从该臂续跑（base_original 有 summary 会 SKIP）。
+  - at: "2026-09-08T12:55:00+08:00"
+    what: >
+      14/14 val 已在 cache（1901 条）。huggingface.co 不可达，改 ModelScope
+      evalscope/BLINK。本机 8 卡空闲（ACTIVE 里 EMA 占卡记录过期）。

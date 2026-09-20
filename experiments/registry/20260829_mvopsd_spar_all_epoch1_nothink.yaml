@@ -1,0 +1,130 @@
+experiment_id: 20260829_mvopsd_spar_all_epoch1_nothink
+title: "SPAR 全量（3-view + 32-view）1 epoch：teacher non-thinking，按 N 分预算"
+status: completed  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-29T22:10:00+08:00"
+started_at: "2026-08-29T22:10:00+08:00"
+owner: "cursor-window-mvopsd"
+driver_pid: 1177888
+train_log: logs/train/20260829_mvopsd_spar_all_epoch1_nothink/train_20260829_221153.log
+
+goal: >
+  用户 2026-08-29 22:04 决策：SPAR 过滤后留下的全部样本都进训练，不再只跑 32-view、也不再摘 oo_*。
+  视角预算按相册 N 分流：3-view 上 teacher=3 / student∈{1,2}；32-view 上 teacher 封顶 8 /
+  student∈{2,3,4,5}。teacher/student 同为 non-thinking。
+
+hypothesis: >
+  合池后 teacher 可靠性是 3-view（约 33%）与 32-view（约 20%，含 oo_* 近零全匹配）的加权平均，
+  不能与 32-view-no-oo 的 27.1% 口径并列。本轮回答的是「全 SPAR + 分档 K/N」是否相对 step 0 有方向。
+
+design:
+  data_sources: [spar_3view, spar_32view]
+  view_budget:
+    spar_3view: {teacher: 3, k_menu: [1, 2], note: "K=1 仅 2,164 条；多数题 required_views=2，只能 K=2"}
+    spar_32view: {teacher_cap: 8, k_menu: [2, 3, 4, 5], truncated_albums: 21025}
+  pool:
+    mixed_plan_spar_kept: 55495
+    train_rows: 54495
+    holdout_rows: 1000
+    train_by_source: {spar_3view: 33970, spar_32view: 20525}
+    includes_spatial_imagination_oo: true
+    oo_rows_in_plan: 6541
+  total_steps: 851
+  epochs: 1.0
+  rationale_for_851: "54,495 / 64 = 851.484，取 851 步即整份训练池恰好遍历一遍不重样"
+  test_freq: 25
+  save_freq: 25
+  shared_protocol:
+    - "teacher_enable_thinking=False"
+    - "student enable_thinking=false"
+    - "lr 2e-6 / batch 64 / rollout.n=1 / frozen teacher"
+    - "vsibench_boxed_primary=True / trust_boxed=True"
+    - "VAL_FILE=vsibench_val_boxed_lastline.parquet"
+    - "VAL_DO_SAMPLE=1 t=1.0 top_p=0.8"
+    - "JUDGE=0"
+  supersedes:
+    - experiment_id: 20260829_mvopsd_spar32_epoch1_nothink
+      why: "只含 32-view 且摘了 oo_*；用户要求 SPAR 全量并按 N 分预算"
+
+anchors:
+  step_0_note: >
+    boxed_lastline + sample 口径下，基座离线锚点约 46.51%（rule，20260828）。
+    训练内 step 0 若落在 53 附近，说明 VAL_FILE 指错。
+  comparability: >
+    与 32-view-only / 摘 oo_* 那条、与 greedy/plain 53.6 带均不可并列。只能自比 step 0。
+
+primary_metric: "val-core/vsibench/overall/acc 走势（自比）"
+must_watch:
+  - "data/step/source/spar_3view/frac 与 spar_32view/frac 接近 62/38"
+  - "3-view 步上 n_views_teacher 应为 3，32-view 步上应为 8"
+  - "训练 response_length/mean 与 clip_ratio"
+  - "self_distillation/teacher_probe 恒定（预期 0.04456961154937744）"
+  - "self_distillation/policy_fallback_fraction 恒 0"
+
+data:
+  plan_3view: data/mvopsd/plan_single_spar_3view/
+  plan_32view: data/mvopsd/plan_single_spar_32view/
+  plan_combined: data/mvopsd/plan_spar_all/
+  train_file: data/mvopsd/parquet_spar_all/main_train.parquet
+  holdout_file: data/mvopsd/parquet_spar_all/main_holdout.parquet
+  val_file: data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet
+  prompt_length_check:
+    student: {max: 1137, cap: 4096, over: 0}
+    teacher_nonthinking: {max: 1738, cap: 12288, over: 0}
+    dangling_frame_refs: 0
+    view_files_checked: "190,454 referenced, unreadable or misaligned = 0"
+
+launch:
+  node: node-A
+  gpus: 8
+  command: |
+    env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL \
+        -u CONDA_PYTHON_EXE PATH=/usr/bin:/usr/local/bin:/bin \
+      EXPERIMENT_NAME=20260829_mvopsd_spar_all_epoch1_nothink \
+      TRAIN_FILE=$PWD/data/mvopsd/parquet_spar_all/main_train.parquet \
+      VAL_FILE=$PWD/data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet \
+      TOTAL_STEPS=851 TEST_FREQ=25 \
+      VAL_DO_SAMPLE=1 VAL_TEMPERATURE=1.0 VAL_TOP_P=0.8 VAL_N=1 \
+      JUDGE=0 \
+      bash scripts/opsd/run_mvopsd.sh main \
+        trainer.resume_mode=disable \
+        actor_rollout_ref.actor.self_distillation.teacher_enable_thinking=False
+  outputs:
+    train_log: logs/train/20260829_mvopsd_spar_all_epoch1_nothink/
+    val_dump: logs/val/20260829_mvopsd_spar_all_epoch1_nothink/
+    rollouts: rollouts/20260829_mvopsd_spar_all_epoch1_nothink/
+    checkpoint: checkpoints/20260829_mvopsd_spar_all_epoch1_nothink/
+  wandb: "slcheng/MV-OPSD，run 名即 experiment_name"
+
+wall_clock_estimate: >
+  训练 851 步 × ~33 s ≈ 7.8 h；评测约 35 点（step 0 + 每 25 步至 850）× ~30–35 min
+  （JUDGE=0）≈ 18–20 h；合计约 26–28 h。checkpoint ~35 个 × ~54 GB 会顶满盘，
+  跑中期需按曲线删中间 ckpt（盘余约 3.0 T，35×54G≈1.9 T 勉强够）。
+
+handoff:
+  current_phase: completed
+  last_updated: "2026-08-31T15:25:00+08:00"
+  current_task: "851/851 已结束；逐步曲线待从 wandb / val dump 写入 metrics"
+  owner: cursor-window-mvopsd
+  active_job_id: null
+  resources: ""
+  blocker: ""
+  next_action: "抽出 36 个 val 点的 overall/acc，写进 metrics；本轮已改跑 SPAR 3-view K=1 vs K=2"
+
+activity_log:
+  - at: "2026-08-31T02:07:00+08:00"
+    what: >
+      训练 851/851 正常结束（墙钟 27.2 h）。step 0 overall 46.71%，末次验证 46.33%。
+      wandb run pf62nv5d。ckpt 仅留 global_step_200；8 卡已释放。
+  - at: "2026-08-29T22:11:53+08:00"
+    what: >
+      正式训练启动（main_ppo PID 1177888）。resolved config：
+      teacher_enable_thinking=False、enable_thinking=False、
+      total_training_steps=851、resume_mode=disable、TRAIN=parquet_spar_all。
+  - at: "2026-08-29T22:10:00+08:00"
+    what: >
+      停 SPAR32-only（PID 772973）。建成 plan_single_spar_3view（34,470，teacher=3，K∈{1,2}，排除 0）
+      与已有 plan_single_spar_32view（21,025，teacher=8，K∈{2,3,4,5}，含 oo_*）合并为 plan_spar_all；
+      parquet train 54,495 / holdout 1,000；Frame-N 悬空 0；prompt 超限 0。
+
+issues: []

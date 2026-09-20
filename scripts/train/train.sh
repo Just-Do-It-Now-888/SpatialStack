@@ -2,6 +2,11 @@
 # Complete QwenVL Training Launch Script with Full Parameter Documentation
 set -euo pipefail
 
+# LESSON-041: subsequent training is conda sr_opsd, not spatialstack-qwen35.
+# shellcheck source=../opsd/require_sr_opsd.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/opsd/require_sr_opsd.sh"
+require_sr_opsd_training_env
+
 # ======================
 # Distributed Configuration
 # ======================
@@ -98,6 +103,12 @@ DATASETS="${DATASETS:-spar_234k%60,llava_hound_64k%60,vlm3r_scannet%60,vsi_appr_
 GEOMETRY_ENCODER_TYPE="${GEOMETRY_ENCODER_TYPE:-vggt}"
 USE_GEOMETRY_ENCODER="${USE_GEOMETRY_ENCODER:-true}"
 DATA_FLATTEN="${DATA_FLATTEN:-False}"
+EPOCHS="${EPOCHS:-1}"
+SAVE_STEPS="${SAVE_STEPS:-1000}"
+MAX_STEPS="${MAX_STEPS:--1}"          # -1 keeps HF's default (epoch-driven)
+MAX_PIXELS="${MAX_PIXELS:-$((576*28*28))}"
+MIN_PIXELS="${MIN_PIXELS:-$((16*28*28))}"
+USE_VGGT_IMAGE_PREPROCESS="${USE_VGGT_IMAGE_PREPROCESS:-true}"
 FEATURE_FUSION_METHOD="${FEATURE_FUSION_METHOD:-deepstack_language_add}"
 GEOMETRY_FUSION_LAYERS="${GEOMETRY_FUSION_LAYERS:-0 1 2}"
 GEOMETRY_ENCODER_LAYERS="${GEOMETRY_ENCODER_LAYERS:-11 17 23}"
@@ -120,19 +131,21 @@ train_args=(
          --optim adamw_torch
          --model_max_length 12800
          --data_flatten "$DATA_FLATTEN"
-         --max_pixels $((576*28*28))
-         --min_pixels $((16*28*28))
+         --max_pixels "$MAX_PIXELS"
+         --min_pixels "$MIN_PIXELS"
+         --use_vggt_image_preprocess "$USE_VGGT_IMAGE_PREPROCESS"
          --base_interval 2
          --video_max_frames 8
          --video_min_frames 4
          --video_max_frame_pixels $((1664*28*28))
          --video_min_frame_pixels $((256*28*28))
-         --num_train_epochs 1
+         --num_train_epochs "$EPOCHS"
+         --max_steps "$MAX_STEPS"
          --warmup_ratio 0.03
          --lr_scheduler_type cosine
          --weight_decay 0.01
          --logging_steps 10
-         --save_steps 1000
+         --save_steps "$SAVE_STEPS"
          --save_total_limit 10
          --deepspeed scripts/zero2_opt.json
          --gradient_checkpointing

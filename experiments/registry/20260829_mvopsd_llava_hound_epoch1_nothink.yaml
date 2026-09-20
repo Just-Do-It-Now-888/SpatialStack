@@ -1,0 +1,140 @@
+experiment_id: 20260829_mvopsd_llava_hound_epoch1_nothink
+title: "llava_hound 完整 1 epoch（586 步）：teacher non-thinking + boxed_lastline 验证"
+status: cancelled  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-29T01:37:00+08:00"
+started_at: "2026-08-29T01:37:29+08:00"
+finished_at: "2026-08-29T17:34:40+08:00"
+owner: "cursor-window-mvopsd"
+driver_pid: 3435888
+train_log: logs/train/20260829_mvopsd_llava_hound_epoch1_nothink/train_20260829_013729.log
+cancelled_reason: "用户 2026-08-29 17:33 要求停止当前模型；停在 step 450 验证中途"
+
+goal: >
+  在 teacher/student 两侧同为 non-thinking 的前提下，用 llava_hound_64k 单源跑满 1 epoch。
+  用户 2026-08-29 决定先跑 llava-hound，中止刚启动的 spar_32view arm
+  （`20260829_mvopsd_spar32_epoch1_nothink`，仅跑到 step 0 评测前被停）。
+
+hypothesis: >
+  llava_hound 的 teacher 可靠性最高（57.7%）。在 non-thinking 同态下跑满 1 epoch，
+  应能判断方法在该源上是否有正收益（相对 step 0）。
+  `20260824` 的 25 步 nothink 对照只证明「不再破坏」（rule_only 53.38→52.57），
+  本轮把规模提到 1.0 epoch。
+
+design:
+  data_source: llava_hound_64k
+  train_rows: 37509
+  total_steps: 586
+  epochs: 1.0
+  rationale_for_586: "37,509 / 64 = 586.078，取 586 步即整份训练池恰好遍历一遍"
+  test_freq: 25
+  save_freq: 25
+  teacher_reliability: "57.7%（as_trained，teacher reliability 报告）"
+  shared_protocol:
+    - "teacher_enable_thinking=False（mvopsd.yaml 默认）"
+    - "student enable_thinking=false"
+    - "lr 2e-6 / batch 64 / rollout.n=1 / frozen teacher"
+    - "teacher 视角上限 8 / student K~U{2,3,4,5}"
+    - "vsibench_boxed_primary=True / trust_boxed=True"
+    - "VAL_FILE=vsibench_val_boxed_lastline.parquet"
+    - "VAL_DO_SAMPLE=1 t=1.0 top_p=0.8"
+    - "JUDGE=0"
+  relation_to_prior:
+    - "相对 20260821 llava_hound arm：改 teacher thinking True→False，且评测口径换成 boxed_lastline+sample"
+    - "相对 20260824 nothink 25 步：同一数据源与 thinking 设定，规模 25→586"
+    - "相对刚停的 20260829 spar32：仅换数据源，其余协议相同"
+
+anchors:
+  step_0_note: >
+    boxed_lastline + sample 口径下，基座离线锚点约 46.51%（rule，20260828）。
+    训练内 step 0 若落在 53 附近，说明 VAL_FILE 指错。
+  comparability: >
+    与 20260821 thinking-on 曲线、与 greedy/plain 53.6 带、与 spar32 本轮均不可直接并列。
+    本轮只能自比 step 0 → 后续点；与 20260824 的 rule_only 也因 prompt/解码不同而不可并列。
+
+primary_metric: "val-core/vsibench/overall/acc 走势（自比）"
+must_watch:
+  - "step 0 应落在 ~42–48 带（boxed_lastline + sample），不是 53"
+  - "训练 response_length/mean 与 clip_ratio（健康参考 20260824：~187–234 / ~0）"
+  - "val-aux/vsibench/resp_tokens 的 median 与 p95"
+  - "self_distillation/teacher_probe 恒定（预期 0.04456961154937744）"
+  - "self_distillation/policy_fallback_fraction 恒 0"
+  - "val-aux/vsibench/boxed/frac"
+
+data:
+  train_file: data/mvopsd/parquet_single_llava_hound_64k/main_train.parquet
+  plan: data/mvopsd/plan_single_llava_hound_64k/
+  val_file: data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet
+
+launch:
+  node: node-A
+  gpus: 8
+  command: |
+    env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL \
+        -u CONDA_PYTHON_EXE PATH=/usr/bin:/usr/local/bin:/bin \
+      EXPERIMENT_NAME=20260829_mvopsd_llava_hound_epoch1_nothink \
+      TRAIN_FILE=$PWD/data/mvopsd/parquet_single_llava_hound_64k/main_train.parquet \
+      VAL_FILE=$PWD/data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet \
+      TOTAL_STEPS=586 TEST_FREQ=25 \
+      VAL_DO_SAMPLE=1 VAL_TEMPERATURE=1.0 VAL_TOP_P=0.8 VAL_N=1 \
+      JUDGE=0 \
+      bash scripts/opsd/run_mvopsd.sh main
+  outputs:
+    train_log: logs/train/20260829_mvopsd_llava_hound_epoch1_nothink/
+    val_dump: logs/val/20260829_mvopsd_llava_hound_epoch1_nothink/
+    rollouts: rollouts/20260829_mvopsd_llava_hound_epoch1_nothink/
+    checkpoint: checkpoints/20260829_mvopsd_llava_hound_epoch1_nothink/
+  wandb: "slcheng/MV-OPSD，run 名即 experiment_name"
+
+wall_clock_estimate: >
+  训练 586 步 × ~33 s ≈ 5.4 h；评测约 24 点（step 0 + 每 25 步）× ~30–35 min
+  （JUDGE=0）≈ 12–14 h；合计约 18–20 h。checkpoint ~23 个 × ~54 GB ≈ 1.2 T（盘余 3.1 T）。
+
+supersedes:
+  - experiment_id: 20260829_mvopsd_spar32_epoch1_nothink
+    why: "用户要求先跑 llava-hound；spar 在启动后约 20 min 被停止，未完成 step 0"
+
+stop_state:
+  last_completed_train_step: 449
+  interrupted_at: "step 450 in-loop validation (incomplete; no dump/ckpt for 450)"
+  latest_complete_val: 425
+  latest_checkpoint: checkpoints/20260829_mvopsd_llava_hound_epoch1_nothink/global_step_425
+  retained_checkpoint: checkpoints/20260829_mvopsd_llava_hound_epoch1_nothink/global_step_200
+  deleted_checkpoints: "25,50,75,100,125,150,175,225,250,275,300,325,350,375,400,425（用户 2026-08-29 17:41 要求只留 step 200）"
+  in_loop_overall_acc:
+    "0": 0.4729
+    "200": 0.4777
+    "425": 0.4650
+  note: "step 0 = 47.29%；step 200 = 47.77%；step 425 = 46.50%。权重仅保留 global_step_200（~54G）。val dump 未删。"
+
+handoff:
+  current_phase: cancelled
+  last_updated: "2026-08-29T17:43:00+08:00"
+  current_task: "用户停止；仅保留 step 200 权重；8 卡空闲"
+  owner: cursor-window-mvopsd
+  active_job_id: null
+  resources: ""
+  blocker: ""
+  next_action: "权重仅剩 global_step_200；若续跑需显式从该步 resume，勿假设 425 仍在"
+
+activity_log:
+  - at: "2026-08-29T17:43:00+08:00"
+    what: >
+      用户要求只保存 step 200 权重。已删除其余 16 个 global_step_*（约 850G），
+      仅留 checkpoints/.../global_step_200（54G）；latest_checkpointed_iteration.txt 改为 200。
+      val dump / 训练日志未动。
+  - at: "2026-08-29T17:34:40+08:00"
+    what: >
+      用户要求停当前模型。对 setsid 进程组 3435849 发 SIGTERM；
+      main_ppo 3435888 / run_mvopsd 已退出；8 卡显存归 0。
+      停在 step 449 训完、step 450 val 中途。最新完整 ckpt/val = 425。
+  - at: "2026-08-29T01:36:00+08:00"
+    what: "用户要求停止 spar32，改先跑 llava-hound；SPAR 进程已清，8 卡空闲"
+  - at: "2026-08-29T01:37:29+08:00"
+    what: >
+      正式训练启动（main_ppo PID 3435888）。resolved config 确认
+      teacher_enable_thinking=False、enable_thinking=False、total_training_steps=586。
+  - at: "2026-08-29T01:37:00+08:00"
+    what: "登记本 registry；准备启动"
+
+issues: []

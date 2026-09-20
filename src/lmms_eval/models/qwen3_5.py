@@ -425,12 +425,20 @@ class Qwen3_5(lmms):
             if "num_beams" not in gen_kwargs:
                 gen_kwargs["num_beams"] = 1
 
+            seed = gen_kwargs.pop("seed", None)
+            if seed is not None:
+                torch.manual_seed(int(seed))
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(int(seed))
+
+            do_sample = bool(gen_kwargs.get("do_sample", False) or gen_kwargs["temperature"] > 0)
+
             generate_start = time.perf_counter()
             output_ids = self.model.generate(
                 **inputs,
                 eos_token_id=self.tokenizer.eos_token_id,
                 pad_token_id=self.tokenizer.pad_token_id,
-                do_sample=gen_kwargs["temperature"] > 0,
+                do_sample=do_sample,
                 temperature=gen_kwargs["temperature"],
                 top_p=gen_kwargs["top_p"],
                 num_beams=gen_kwargs["num_beams"],

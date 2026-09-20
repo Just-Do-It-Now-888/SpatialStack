@@ -406,13 +406,30 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     actor_module_class = AutoModel
 
-            actor_module = actor_module_class.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
-                config=actor_model_config,
-                trust_remote_code=trust_remote_code,
-                attn_implementation=attn_implementation,
-            )
+            uses_geometry = bool(getattr(actor_model_config, "use_geometry_encoder", False))
+            if uses_geometry:
+                from qwen_vl.model.modeling_qwen3_5 import Qwen3_5ForConditionalGenerationWithGeometry
+
+                from verl.utils.qwen35_geometry import freeze_geometry_encoder
+
+                actor_module = Qwen3_5ForConditionalGenerationWithGeometry.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                    attn_implementation=attn_implementation,
+                    geometry_encoder_path=getattr(actor_model_config, "geometry_encoder_path", None),
+                )
+                freeze_geometry_encoder(actor_module)
+                self.use_orig_params = True
+            else:
+                actor_module = actor_module_class.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                    attn_implementation=attn_implementation,
+                )
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
@@ -473,7 +490,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 }
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
 
-        self.use_orig_params = fsdp_config.get("use_orig_params", False)
+        self.use_orig_params = fsdp_config.get("use_orig_params", False) or getattr(self, "use_orig_params", False)
         if self.config.actor.get("freeze_vision_tower", False):
             vision_tower = get_vl_model_vision_tower(actor_module)
             if vision_tower is not None:
@@ -2085,6 +2102,13 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
-    ) -> list[int]:
-        ret = await self.rollout.generate(prompt_ids, sampling_params, request_id, image_data=image_data)
+        video_data: Optional[list[Any]] = None,
+    ):
+        ret = await self.rollout.generate(
+            prompt_ids,
+            sampling_params,
+            request_id,
+            image_data=image_data,
+            video_data=video_data,
+        )
         return ret

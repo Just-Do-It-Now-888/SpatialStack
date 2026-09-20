@@ -1,0 +1,121 @@
+experiment_id: 20260906_vsibench_vllm_tok2048
+title: "VSI-Bench vLLM：基座 vs SPAR3 K=1 step 55，统一 max_tokens=2048"
+status: completed
+completed_at: "2026-09-06T06:08:04+08:00"
+created_at: "2026-09-06T02:55:00+08:00"
+owner: cursor-window-mvopsd
+node: node-B
+
+goal: >
+  对照表 VSI original 用 1024、boxed last-line 用 4096。用户要求全部改为 2048，
+  用同一 vLLM harness 重跑 original/boxed × greedy/sample × 基座/SPAR3（8 臂），
+  再更新评测对照表。不可与 1024/4096 旧分并列。
+
+protocol:
+  launcher: scripts/opsd/run_vsibench_vllm_tok2048_chain.sh
+  harness: scripts/opsd/tools/eval_vsibench_vllm.py
+  python: conda sr_opsd
+  frames: 32
+  max_tokens: 2048
+  max_model_len: 16384
+  tensor_parallel_size: 8
+  enable_thinking: false
+  judge: false
+  boxed_suffix: " The final answer MUST BE put in \\boxed{} on the last line of your response."
+  sample:
+    do_sample: true
+    temperature: 1.0
+    top_p: 0.8
+    seed: 20260904
+
+models:
+  base: models/Qwen3.5-4B
+  spar3: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+
+arms:
+  base_plain_greedy:
+    protocol: spatialstack_plain
+    sample: false
+    status: done
+    overall: 52.81
+    answered: 98.60
+    truncated_pct: 1.54
+  spar3_plain_greedy:
+    protocol: spatialstack_plain
+    sample: false
+    status: done
+    overall: 46.73
+    answered: 96.35
+    truncated_pct: 1.81
+    delta_vs_base: -6.08
+  base_boxed_greedy:
+    protocol: spatialstack
+    sample: false
+    status: done
+    overall: 47.31
+    answered: 94.74
+    truncated_pct: 4.17
+  spar3_boxed_greedy:
+    protocol: spatialstack
+    sample: false
+    status: done
+    overall: 49.93
+    answered: 97.86
+    truncated_pct: 2.22
+    delta_vs_base: 2.62
+  base_plain_sample:
+    protocol: spatialstack_plain
+    sample: true
+    status: done
+    overall: 48.32
+    answered: 98.73
+    truncated_pct: 1.13
+  spar3_plain_sample:
+    protocol: spatialstack_plain
+    sample: true
+    status: done
+    overall: 47.45
+    answered: 97.50
+    truncated_pct: 1.07
+    delta_vs_base: -0.87
+  base_boxed_sample:
+    protocol: spatialstack
+    sample: true
+    status: done
+    overall: 47.51
+    answered: 97.60
+    truncated_pct: 2.57
+  spar3_boxed_sample:
+    protocol: spatialstack
+    sample: true
+    status: done
+    overall: 46.90
+    answered: 98.56
+    truncated_pct: 1.50
+    delta_vs_base: -0.61
+
+comparability:
+  do_not_mix:
+    - "vLLM original greedy 1024 = 52.47 / 47.82"
+    - "vLLM boxed greedy 4096 = 48.42 / 49.61"
+    - "HF VSI"
+    - "greedy vs sample"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-06T18:50:00+08:00"
+  current_task: "8 臂 rc=0；对照表 VSI 已改为 2048"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: ""
+
+issues: []
+activity_log:
+  - at: "2026-09-06T18:50:00+08:00"
+    what: >
+      ALL DONE 06:08。greedy original 52.81/46.73（−6.08），boxed 47.31/49.93（+2.62）。
+      对照表已更新。8 卡已释放。
+  - at: "2026-09-06T02:55:00+08:00"
+    what: "登记并准备在 node-B 启动 8 臂 vLLM @2048。"

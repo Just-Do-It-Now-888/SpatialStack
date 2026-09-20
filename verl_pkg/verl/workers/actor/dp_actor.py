@@ -142,6 +142,13 @@ class DataParallelPPOActor(BasePPOActor):
         teacher_regularization = getattr(self_distillation_cfg, "teacher_regularization", "ema")
         if self.teacher_module is None or self.teacher_module is self.actor_module:
             raise ValueError("Teacher updates require a separate teacher_module in the actor worker.")
+        if teacher_regularization == "frozen":
+            # The teacher stays at the reference weights for the whole run, so the
+            # student is matched against a fixed multi-view posterior instead of
+            # one that follows it. Expressed as its own mode rather than as
+            # teacher_update_rate=0.0, which reaches the same early return below
+            # while still reading as "EMA" in the config.
+            return
         with torch.no_grad():
             if teacher_regularization == "ema":
                 update_rate = getattr(self_distillation_cfg, "teacher_update_rate", 0.0)
@@ -175,6 +182,25 @@ class DataParallelPPOActor(BasePPOActor):
                 return
 
             return
+
+    def _teacher_probe(self) -> Optional[float]:
+        """Constant-cost fingerprint of the teacher weights, logged every step.
+
+        "Frozen" is a claim about what the code does not do, and the only way to
+        check it from outside is to watch something that would move if it were
+        wrong. This sums a fixed 64-element slice of the teacher's first
+        parameter shard: identical on every step under `frozen`, drifting under
+        `ema`. Reading one slice keeps it free enough to leave on always
+        (LESSON-014: verify by result, not by configuration).
+        """
+        if self.teacher_module is None or self.teacher_module is self.actor_module:
+            return None
+        for param in self.teacher_module.parameters():
+            data = param.data
+            if data is None or data.numel() == 0:
+                continue
+            return float(data.detach().flatten()[: min(64, data.numel())].float().sum().item())
+        return None
 
     @staticmethod
     def _has_non_empty_multi_modal_inputs(multi_modal_inputs) -> bool:
@@ -357,6 +383,15 @@ class DataParallelPPOActor(BasePPOActor):
             from verl.utils.model import extract_multi_modal_inputs
 
             multi_modal_inputs = extract_multi_modal_inputs(micro_batch["multi_modal_inputs"])
+            geo = multi_modal_inputs.get("geometry_encoder_inputs")
+            if geo is not None:
+                device = micro_batch["input_ids"].device
+                if isinstance(geo, torch.Tensor):
+                    multi_modal_inputs["geometry_encoder_inputs"] = [geo.to(device)]
+                else:
+                    multi_modal_inputs["geometry_encoder_inputs"] = [
+                        t.to(device) if torch.is_tensor(t) else t for t in geo
+                    ]
 
         with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):
             input_ids = micro_batch["input_ids"]
@@ -1208,6 +1243,9 @@ class DataParallelPPOActor(BasePPOActor):
                     time.perf_counter() - teacher_update_start
                 )
         if self_distillation_enabled:
+            teacher_probe = self._teacher_probe()
+            if teacher_probe is not None:
+                metrics["self_distillation/teacher_probe"] = teacher_probe
             for key, total_time in stage_wall_time_totals.items():
                 metrics[key] = Metric(aggregation=AggregationType.MAX, value=total_time)
         metric_keys_to_keep_unreduced = set(stage_wall_time_totals.keys()) if stage_wall_time_totals is not None else set()

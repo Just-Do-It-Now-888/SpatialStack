@@ -1,4 +1,5 @@
 
+import importlib.util
 import os
 from pathlib import Path
 import yaml
@@ -92,6 +93,101 @@ with open(Path(__file__).parent / "sparbench.yaml", "r") as f:
             safe_data.append(line)
 cache_name = yaml.safe_load("".join(safe_data))["dataset_kwargs"]["cache_dir"]
 
+_DEFAULT_MAX_NEW_TOKENS = 100
+_MAX_NEW_TOKENS_OVERRIDE = os.environ.get("SPARBENCH_MAX_NEW_TOKENS")
+SPARBENCH_MAX_NEW_TOKENS = (
+    int(_MAX_NEW_TOKENS_OVERRIDE) if _MAX_NEW_TOKENS_OVERRIDE else _DEFAULT_MAX_NEW_TOKENS
+)
+
+# official = upstream full-string MCA / full-text NA-VCI (39.88 / 13.87 @2048).
+# lastline = VSI answer_tail extract, no \\boxed{}; prompt asks for last-line answer.
+# boxed = lastline parsers after boxed-primary; prompt asks for \\boxed{} on last line.
+SPARBENCH_PROTOCOLS = ("official", "lastline", "boxed")
+DEFAULT_PROTOCOL = "official"
+LASTLINE_SUFFIX = (
+    " The final answer MUST BE put on the last line of your response."
+)
+_SHARED_SCORING = os.path.normpath(
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "..",
+        "..",
+        "..",
+        "scripts",
+        "opsd",
+        "vsibench_scoring.py",
+    )
+)
+_shared_module = None
+_LETTER_GOLD_RE = re.compile(r"^[A-F]$", re.IGNORECASE)
+
+
+def _resolve_protocol():
+    value = (os.environ.get("SPARBENCH_PROTOCOL") or DEFAULT_PROTOCOL).strip()
+    if value not in SPARBENCH_PROTOCOLS:
+        raise ValueError(
+            f"unknown SPARBENCH_PROTOCOL {value!r}; expected one of {SPARBENCH_PROTOCOLS}"
+        )
+    return value
+
+
+SPARBENCH_PROTOCOL = _resolve_protocol()
+
+
+def _shared():
+    global _shared_module
+    if _shared_module is None:
+        spec = importlib.util.spec_from_file_location("vsibench_scoring", _SHARED_SCORING)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load vsibench_scoring from {_SHARED_SCORING}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _shared_module = module
+    return _shared_module
+
+
+def lastline_enabled(protocol: str | None = None) -> bool:
+    return (protocol or SPARBENCH_PROTOCOL) == "lastline"
+
+
+def boxed_enabled(protocol: str | None = None) -> bool:
+    return (protocol or SPARBENCH_PROTOCOL) == "boxed"
+
+
+def lastline_parse_enabled(protocol: str | None = None) -> bool:
+    return (protocol or SPARBENCH_PROTOCOL) in ("lastline", "boxed")
+
+
+def boxed_suffix() -> str:
+    return _shared().BOXED_LASTLINE_SUFFIX
+
+
+def _last_parse_line(text: str) -> str:
+    scoring = _shared()
+    cleaned = scoring._strip_thinking(text or "").strip()
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    return scoring._line_for_answer_parse(lines)
+
+# Referenced from sparbench.yaml as `!function utils.SPARBENCH_GENERATION_KWARGS`.
+SPARBENCH_GENERATION_KWARGS = {
+    "max_new_tokens": SPARBENCH_MAX_NEW_TOKENS,
+    "temperature": 0,
+    "top_p": 1.0,
+    "num_beams": 1,
+    "do_sample": False,
+}
+if SPARBENCH_MAX_NEW_TOKENS > _DEFAULT_MAX_NEW_TOKENS:
+    # TaskConfig fills a missing until with the fewshot delimiter ("\n\n").
+    # The 100-token dump already stopped there; raising the cap without this
+    # would still cut CoT at the first blank line.
+    SPARBENCH_GENERATION_KWARGS["until"] = []
+
+eval_logger.info(
+    f"[sparbench] protocol={SPARBENCH_PROTOCOL} max_new_tokens={SPARBENCH_MAX_NEW_TOKENS} "
+    f"until={SPARBENCH_GENERATION_KWARGS.get('until', '<TaskConfig default>')}"
+)
+
 from PIL import Image
 def sparbench_doc_to_visual(doc):
     # cache_dir = os.path.join(base_cache_dir)
@@ -103,26 +199,31 @@ def sparbench_doc_to_visual(doc):
     return image
 
 
-def sparbench_doc_to_text(doc, lmms_eval_specific_kwargs=None):
+def sparbench_doc_to_text(doc, lmms_eval_specific_kwargs=None, protocol=None):
     question = doc["question"]
-        
-    pre_prompt = lmms_eval_specific_kwargs.get("pre_prompt", "") # or "These are frames of a video."
-    
+    lmms_eval_specific_kwargs = lmms_eval_specific_kwargs or {}
+    pre_prompt = lmms_eval_specific_kwargs.get("pre_prompt", "")
+
     if doc['task'] in NA_QUESTION_TYPES:
         post_prompt = lmms_eval_specific_kwargs.get("na_post_prompt", "") or "Please answer the question using a single word or phrase."
-        return pre_prompt + "\n" + question + "\n" + post_prompt
+        text = pre_prompt + "\n" + question + "\n" + post_prompt
     elif doc['task'] in MCA_QUESTION_TYPES:
         post_prompt = ""
         if doc['task'] in ['position_matching', "camera_motion_infer"]:
             post_prompt = "The values represent the bounding box coordinates normalized to a 0-1000 scale, with the top-left corner as the origin of the image."
-        post_prompt2 = "Answer with the option's letter from the given choices directly."
-        return pre_prompt + "\n" + question + "\n" + post_prompt + "\n" + post_prompt2
+        post_prompt2 = lmms_eval_specific_kwargs.get(
+            "mca_post_prompt", ""
+        ) or "Answer with the option's letter from the given choices directly."
+        text = pre_prompt + "\n" + question + "\n" + post_prompt + "\n" + post_prompt2
     elif doc['task'] in SPECIAL_QUESTION_TYPES:
-        post_prompt1 = ""
-        post_prompt2 = ""
-        return pre_prompt + "\n" + question + "\n" + post_prompt1 + "\n" + post_prompt2
+        text = pre_prompt + "\n" + question + "\n"
     else:
         raise ValueError(f"Unknown question type: {doc['question_type']}")
+    if boxed_enabled(protocol):
+        text = text + boxed_suffix()
+    elif lastline_enabled(protocol):
+        text = text + LASTLINE_SUFFIX
+    return text
 
 
 def process_docs(dataset: datasets.Dataset) -> datasets.Dataset:
@@ -243,17 +344,62 @@ def compute_cmi_metric(pred, answer):
 
 
 def exact_match(pred, target):
-    # return 1. if pred.lower() == target.lower() else 0.
-    pred = pred.lower()
-    target = target.lower()
-    if pred.lower() == target.lower():
+    pred = "" if pred is None else str(pred)
+    target = "" if target is None else str(target)
+    pred_l = pred.lower()
+    target_l = target.lower()
+    if not pred_l:
+        return 0.
+    if pred_l == target_l:
         return 1.
-    elif pred in target:
+    elif pred_l in target_l:
         return 1.
-    elif pred[0] == target:
+    elif pred_l[0] == target_l:
         return 1.
     else:
         return 0
+
+
+def score_sparbench_prediction(task: str, pred: str, answer, protocol: str | None = None):
+    """Return ``(metric, parsed, kind)``. kind is MCA / NA / VCI."""
+    proto = protocol or SPARBENCH_PROTOCOL
+    pred = pred or ""
+    scored = pred
+    if boxed_enabled(proto):
+        scored, _ = _shared().apply_boxed_primary(pred, True)
+    if task in MCA_QUESTION_TYPES:
+        kind = "MCA"
+        gold = str(answer).strip()
+        if lastline_parse_enabled(proto):
+            if _LETTER_GOLD_RE.match(gold):
+                parsed = _shared().extract_vsibench_option(scored) or ""
+            else:
+                parsed = _last_parse_line(scored)
+            return exact_match(parsed, gold), parsed, kind
+        return exact_match(pred, gold), pred, kind
+    if task in NA_QUESTION_TYPES:
+        kind = "NA"
+        try:
+            if lastline_parse_enabled(proto):
+                parsed_num = _shared().extract_vsibench_number(scored)
+            else:
+                parsed_num = to_float(process_na(pred, task))
+            metric = mean_relative_accuracy(
+                parsed_num, to_float(answer), start=.5, end=.95, interval=.05
+            )
+            parsed = "" if parsed_num is None else str(parsed_num)
+            return float(metric), parsed, kind
+        except Exception:
+            return WORST_CASE_FOR_METRICS["MRA:.5:.95:.05"], "", kind
+    if task in SPECIAL_QUESTION_TYPES:
+        kind = "VCI"
+        try:
+            vci_text = _last_parse_line(scored) if lastline_parse_enabled(proto) else pred
+            metric = compute_vci_metric(vci_text, answer)
+            return float(metric), vci_text, kind
+        except Exception:
+            return 0.0, "", kind
+    raise ValueError(f"Unknown question type: {task}")
 
 def abs_dist_norm(pred, target):
     if target == 0.0:
@@ -282,25 +428,19 @@ def to_float(pred):
 def sparbench_process_results(doc, results):
     
     doc['prediction'] = results[0]
-    if doc['task'] in MCA_QUESTION_TYPES:
-        for key, value in METRICS_FOR_MCA.items():
-            doc[key] = eval(value)(doc['prediction'], doc['answer'])
-        pass
-    elif doc['task'] in NA_QUESTION_TYPES:
-        for key, value in METRICS_FOR_NA.items():
-            try:
-                doc[key] = eval(value)(to_float(process_na(doc['prediction'], doc['task'])), to_float(doc['answer']))
-            except:
-                doc[key] = WORST_CASE_FOR_METRICS[key]
-    elif doc['task'] in SPECIAL_QUESTION_TYPES:
-        if doc['task'] == "view_change_infer":
-            try:
-                doc['vci_metric'] = compute_vci_metric(doc['prediction'], doc['answer'])
-            except:
-                doc['vci_metric'] = 0
-
+    metric, parsed, kind = score_sparbench_prediction(
+        doc['task'], doc['prediction'], doc['answer']
+    )
+    doc['parsed_answer'] = parsed
+    doc['protocol'] = SPARBENCH_PROTOCOL
+    if kind == "MCA":
+        doc['accuracy'] = metric
+    elif kind == "NA":
+        doc['MRA:.5:.95:.05'] = metric
+    elif kind == "VCI":
+        doc['vci_metric'] = metric
     else:
-        raise ValueError(f"Unknown question type: {doc['question_type']}")
+        raise ValueError(f"Unknown question type: {doc.get('question_type')}")
 
     return {"sparbench_score": doc}
 

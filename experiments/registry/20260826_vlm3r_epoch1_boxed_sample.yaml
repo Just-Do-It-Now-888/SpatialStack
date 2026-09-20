@@ -1,0 +1,257 @@
+experiment_id: 20260826_vlm3r_epoch1_boxed_sample
+title: "vlm3r 完整 1 epoch（477 步）：teacher non-thinking + 验证采样 + boxed prompt + boxed 优先判分"
+status: running  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-26T17:20:00+08:00"
+started_at: "2026-08-26T17:31:00+08:00"
+owner: "cursor-window-mvopsd"
+driver_pid: 3750885
+
+goal: >
+  这是 `20260824_teacher_thinking_off` 之后的第一条**完整 epoch** arm。前面所有 arm
+  都是 25~175 步（≤0.05 epoch），只够证明「长度爆炸的根因是 teacher thinking」这一条
+  破坏性机制，没有任何一条跑到足以判断方法是否有正收益的规模。本轮把训练量提到
+  vlm3r 全量遍历一遍（30,567 行 / batch 64 = 477 步），并同时把评测口径换成
+  用户在 2026-08-26 决定的那一套（采样 + boxed prompt + boxed 优先判分）。
+
+hypothesis: >
+  可检验的表述：在 teacher/student 两侧同为 non-thinking 的前提下，把训练量从 0.04 epoch
+  提到 1.0 epoch，VSI-Bench 会出现**可判读的方向**——要么持续上行（方法有正收益），
+  要么单调下行/长尾持续变粗（方法在这个数据源上是负收益）。
+  `20260824` 那条 25 步 arm 给出的是 −0.81 pp 与「p95 从 333 涨到 1024 的长尾正在形成」，
+  两者都在噪声或不可判读的量级上，本轮的作用是把这个未定状态跑到能判读。
+  **两个方向都是有信息的。**
+
+design:
+  changed_vs_control: 4
+  note: >
+    **这不是单变量 arm，且刻意如此。** 前面已经用 20260824 做完了 thinking 的单变量因果
+    定位，本轮的目的不是再做因果归因，而是在一个用户选定的完整配置下拿到规模化读数。
+    因此本轮**不能**用来归因任何单项改动的贡献；若结果为负，需要退回单变量 arm 才能定位。
+  changes:
+    - "训练数据源：llava_hound_64k -> vlm3r_scannet（30,567 行）"
+    - "训练量：25 步 / 0.043 epoch -> 477 步 / 1.0 epoch"
+    - "验证解码：贪心 -> 采样（t=1.0, top_p=0.8, n=1）"
+    - "验证 prompt：plain -> boxed（追加 ' The final answer MUST BE put in \\boxed{}.'）"
+  everything_else: >
+    模型 `models/Qwen3.5-4B`、lr 2e-6、batch 64、rollout.n=1、frozen teacher、
+    teacher_enable_thinking=False、teacher 视角上限 8、student K~U{2,3,4,5}、
+    max_prompt 4096 / max_response 1024、val prompt cap 11264、seed 20260816、
+    验证集仍是同一批 5,130 题 @32 帧（同一份 frames，逐帧复用未重抽）。
+  total_steps: 477
+  test_freq: 25
+  save_freq: 25
+  epochs: 1.0
+  rationale_for_477_steps: "30,567 / 64 = 477.6，取 477 步即整份 vlm3r 恰好遍历一遍不重样"
+  rationale_for_test_freq_25: >
+    20 个评测点（含 step 0）。评测占约 74% 墙钟，TEST_FREQ=50 能省 6 h 但只剩 10 个点；
+    20260824 观察到的「验证 resp_tokens p95 从 333 涨到 1024」这条长尾在 477 步里是主风险，
+    25 步一个点是能看清它走势的最粗粒度。步数网格也与历史 arm（25 的倍数）对齐。
+
+code_changes_required:
+  note: "本轮的 boxed 部分需要新代码；前三项都是已有开关。启动前这些改动必须已落盘并测过。"
+  - what: "build_vsibench_val_parquet.py 新增 --prompt-suffix / --tag"
+    why: >
+      训练内评测的 prompt 是**预先烤进 val parquet** 的（该脚本第 151 行调
+      vsibench_doc_to_text），训练回路里没有任何 prompt_suffix 通路。所以 boxed
+      只能通过另建一份 val parquet 引入。
+    guard: "有 suffix 但无 tag 时直接 SystemExit，防止覆盖 plain 那份（所有历史训练内数字的基准）"
+    artifact: "data/eval/vsibench_verl/vsibench_val_boxed.parquet，5,130 行"
+    verified: >
+      plain 那份 md5 前后一致（5264a3d0299405dbba095cb24ca4a2b2）；
+      5,130 行逐行核对 boxed prompt == plain prompt + 后缀，差异行数 0；
+      system turn / ground_truth / images 三列逐样本相同；frames 9,216 张全部复用未重抽。
+  - what: "mvopsd_reward.py 新增 reward_kwargs.vsibench_boxed_primary"
+    why: "有闭合 \\boxed{} 时只读框内，无框退回原解析器（用户决策：优先 + 兼容退回）"
+    default: "False——不设它则今天以前的每条曲线逐字节复现（LESSON-013）"
+    new_metric_key: "boxed_present，对每一行都返回（含非 VSI 行），否则混源 batch 会让 _validate 断言失败"
+  - what: "ray_trainer.py 新增 trainer.validation_judge.trust_boxed"
+    why: >
+      boxed 优先的 judge 侧对应物。已经从框内结算过的行不再送 judge，否则严判会用
+      框外推理里读到的答案覆写掉框内答案。无框行仍走严判 extract。
+    side_effect: "judge 成本随合规率下降：92% 合规下只有约 8% 的行送判，严判从 12.4 min 降到约 1~2 min"
+    new_metric_keys:
+      - "val-aux/vsibench/judge/boxed_trusted：靠框结算的行数"
+      - "val-aux/vsibench/boxed/frac：合规率，即两个判分层的混合权重"
+  - what: "mvopsd.yaml：teacher_enable_thinking True -> False"
+    why: "20260824 已证明这是长度爆炸的唯一根因（LESSON-029）"
+  - what: "test_thinking_split.py 改为机制与配置分离断言"
+    why: >
+      该文件原先把「teacher 开 thinking」写成固定期望，配置改了就会失败。
+      现在对 True/False 各渲染一次校验机制（不依赖当前配置），
+      再单独断言当前配置两侧同为 non-thinking，因此任一侧被悄悄改动仍会被抓到。
+  - what: "新增 scripts/opsd/tests/test_boxed_primary_scoring.py"
+    covers: "默认关闭、有框只读框、无框退回、boxed_present 键恒存在、5,130 条 gold 全部自洽、prompt 串不成为答案"
+
+anchors:
+  note: >
+    **本轮 step 0 与历史任何数字都不可直接并列。** 同时改了 prompt 与解码，
+    两者各自都在基座上有已量化的位移。下表是把位移拆开后的推算，
+    step 0 的作用就是把这个新口径的锚点实测出来。
+  measured_offline_by_replay:
+    method: "把归档的 boxed 探针回答喂进训练内判分链（mvopsd_reward + vsibench_metrics）重放"
+    plain_1024_boxed_primary_off: 53.13
+    plain_1024_boxed_primary_on: 53.13   # 合规率 0%，delta 恰好 +0.00，证明开关不污染历史曲线
+    boxed_1024_boxed_primary_off: 45.98
+    boxed_1024_boxed_primary_on: 47.39   # 合规率 91.68%
+    boxed_8192_boxed_primary_on: 47.92   # 合规率 95.79%
+  prompt_cost: >
+    boxed prompt 本身在基座上值约 **−5.7 pp**（47.39 vs 53.13，同为贪心 @1024、同一判分链）。
+    这是 prompt 的代价而非模型的，必须先钉住再看曲线。
+  boxed_primary_gain: >
+    boxed 优先判分在 boxed arm 上是 **+1.4 pp**（45.98 -> 47.39）。方向是「加分」而不是
+    「减分」，说明整段尾部扫描此前读出的是**错答案**而框内是对的——即这个改动去掉的是
+    假阳性，不是把不合规行罚成零分。
+  sampling_shift: >
+    2026-08-25 的 2x2 实测：采样对**健康**权重是 −4.87 pp（judge 口径），
+    对已退化的 checkpoint 是 +14.15 pp。本轮 teacher non-thinking 的目的正是保持健康，
+    所以采样预期让整条曲线系统性偏低。
+  step_0_expected_band: >
+    47.4（boxed + boxed 优先，贪心）叠加采样的 −2~−5，预期落在 **42~47**。
+    这是本轮的第一道正确性闸门。**若 step 0 落在 53 附近，说明 boxed 后缀没生效**
+    （很可能 VAL_FILE 指到了 plain 那份），必须先查而不是解读曲线。
+  compliance_expected: "约 92%（@1024 截断率 7.93%，截断即失去闭合框，这些行走退回路径）"
+
+comparability:
+  cross_arm: >
+    **本轮与任何历史 arm 都没有可并列的列。** 历史 arm 唯一合法的跨轮列是
+    `val-core/vsibench/rule_only/acc`，而本轮该列的 prompt 与解码都变了。
+    本轮只能**自比**：step 0 与后续 19 个点之间的走势。
+  internal_mixture_caveat: >
+    本轮报的 `overall/acc` 是**两个判分层的混合**：约 92% 的行由框内结算，
+    约 8% 的行由 judge 严判结算，混合权重就是合规率。
+    因此 `val-aux/vsibench/boxed/frac` 是必读列——合规率一旦在训练中下滑，
+    分数的层间构成就变了，那会看起来像模型变化。
+  single_seed: "单 seed 无误差棒，且验证是采样。几个百分点的差异不可判读，方向性趋势才可判读。"
+
+primary_metric: "val-core/vsibench/overall/acc 在 20 个点上的走势（自比）"
+must_watch:
+  - "step 0 必须落在 42~47 带；落在 53 附近说明 boxed 后缀没生效，先查 VAL_FILE"
+  - "val-aux/vsibench/boxed/frac：起点应约 0.92，下滑意味着判分层构成在变"
+  - "val-aux/vsibench/resp_tokens 的 p95 与 median：20260824 在 25 步内 p95 就从 333 涨到 1024，这是本轮主风险"
+  - "训练侧 response_length/mean 与 clip_ratio：健康区间是 187~234 与约 0（20260824 实测）"
+  - "self_distillation/teacher_probe 必须恒定（frozen teacher），预期 0.04456961154937744"
+  - "self_distillation/policy_fallback_fraction 必须恒 0"
+  - "val-aux/vsibench/judge/fellback_to_rules：为 1 时该点位不是同一口径，不能并列"
+  - "answered/frac：20260824 从 98.23% 掉到 95.05%，配合 p95 一起读"
+
+interpretation_rule: >
+  1. 本轮回答的是「在这套配置下，跑满 vlm3r 一遍会往哪个方向走」，
+     **不能**归因到四项改动中的任何一项——那需要退回单变量 arm。
+  2. 分数必须与 `boxed/frac` 一起读。合规率变化会以判分层构成的形式移动分数。
+  3. 长尾指标（resp_tokens p95、answered/frac）与分数同权重看。20260824 的教训是
+     均值和中位数都不动时长尾已经在变粗（LESSON-020）。
+  4. vopd_loss / JSD 平台的高低与下游能力无关，不能用来判断方法是否起作用（LESSON-012，
+     20260824 已第二次独立复现：loss 平台几乎相同而下游差 31.72 pp）。
+
+launch:
+  node: node-A
+  gpus: 8
+  preflight:
+    node: "dsw-455344-95d655c8f-xm7dq（node-A）"
+    gpus_free: "8 卡，0 MiB 占用，无残留 ray/vllm 进程"
+    disk_free: "3.3T"
+    checkpoint_dir_empty: true
+    train_file_rows: 30567
+    val_file_rows: 5130
+    env_cleaned: >
+      启动 shell 里 CONDA_DEFAULT_ENV=base、CONDA_PREFIX=/home/c30084464/miniconda3，
+      因此必须清（ISSUE-501）。清后 /usr/bin/python3 可见 vllm / verl / torch / transformers。
+    override_types_checked: >
+      hydra compose 后 vsibench_boxed_primary=True(bool)、trust_boxed=True(bool)、
+      teacher_enable_thinking=False(bool)、judge.mode=extract
+    checkpoint_size: "冒烟实测单个 checkpoint 54 GB；19 个约 1.0 TB，余量 3.3 T 足够（max_actor_ckpt_to_keep=null 全保留）"
+  command: |
+    env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL \
+        -u CONDA_PYTHON_EXE PATH=/usr/bin:/usr/local/bin:/bin \
+      EXPERIMENT_NAME=20260826_mvopsd_vlm3r_epoch1_boxed_sample \
+      TRAIN_FILE=$PWD/data/mvopsd/parquet_single_vlm3r_scannet/main_train.parquet \
+      VAL_FILE=$PWD/data/eval/vsibench_verl/vsibench_val_boxed.parquet \
+      TOTAL_STEPS=477 TEST_FREQ=25 \
+      VAL_DO_SAMPLE=1 VAL_TEMPERATURE=1.0 VAL_TOP_P=0.8 VAL_N=1 \
+      bash scripts/opsd/run_mvopsd.sh main
+  path_note: >
+    PATH 前置 /usr/bin 且清 conda 变量是必须的（ISSUE-304 + ISSUE-501）：训练环境是
+    系统 python3.12 + ~/.local，conda 的 PYTHONNOUSERSITE=1 会让 python 看不见 ~/.local 里的 vllm。
+  outputs:
+    train_log: logs/train/20260826_mvopsd_vlm3r_epoch1_boxed_sample/
+    val_dump: logs/val/20260826_mvopsd_vlm3r_epoch1_boxed_sample/
+    rollouts: rollouts/20260826_mvopsd_vlm3r_epoch1_boxed_sample/
+    checkpoint: checkpoints/20260826_mvopsd_vlm3r_epoch1_boxed_sample/
+  wandb: "slcheng/MV-OPSD，run 名即 experiment_name"
+
+wall_clock_estimate: >
+  训练 477 步 × 约 33 s/步（20260824 实测 timing_s/step=33.0）= 约 4.4 h。
+  评测 20 点（step 0 + 每 25 步）：生成约 35 min/点（plain 在训练内实测 29.5 min；
+  boxed 解码量是 plain 的 3.7 倍——mean 356 vs 97 token——但 32 帧 prefill 主导，
+  离线 boxed 全量实测约 21 min vs plain 同批次，所以按 +20% 估而不是 +270%），
+  judge 因 trust_boxed 只判约 8% 的行，约 1~2 min/点，合计约 37 min/点 = 约 12.3 h。
+  总计约 **16.7 h**，另加 vLLM 起引擎与 judge 预热约 15 min。评测占约 74% 墙钟。
+  存盘 19 个 checkpoint，需确认磁盘余量。
+
+do_not: >
+  不要把本轮任何数字与 53.6 带并列——prompt 与解码都变了，见 comparability；
+  不要在本轮结果出来前改 val parquet 或判分链（改了曲线前后段就不同口径）；
+  不要因为 step 0 比历史低 6~11 分就判定模型退化，那是协议位移，已在 anchors 里拆开量化。
+
+smoke:
+  at: "2026-08-26T17:21–17:31"
+  config: "SMOKE=1（2 步 / batch 8 / TEST_FREQ=1）+ vsibench_val_boxed_8scenes.parquet（68 题）+ 采样 + judge"
+  experiment_name: 20260826_vlm3r_boxed_sample_smoke
+  log: logs/train/_smoke/boxed_sample_smoke.log
+  verdict: "**通过**，三条新通路全部点亮"
+  evidence:
+    prompt: "验证 prompt 结尾确实是 'The final answer MUST BE put in \\boxed{}.'，MCA 与 NA 两种题型都有"
+    boxed_primary: "新指标 boxed_present 逐题型上报并汇总；val-aux/vsibench/boxed/frac = 0.985（68 题里 67 题合规）"
+    trust_boxed: >
+      val-aux/vsibench/judge/boxed_trusted = 67，judge/pending = 1、graded = 1、seconds = 0.46。
+      即 67 行由框内结算未送判，只有那 1 行无框的走了严判——成本下降通路确认生效。
+    sampling: "横幅 'val decoding=SAMPLING t=1.0 top_p=0.8 n=1'，val_kwargs 已切换"
+    dataset: "data/step/source/vlm3r_scannet/frac = 1.0"
+    frozen_teacher: "teacher_probe = 0.04456961154937744，与前七轮同值；policy_fallback_fraction = 0"
+    health: "response_length/mean 168.6、clip_ratio 0、aborted_ratio 0"
+    judge_startup: "95 s 起好并进入 sleep level 1"
+  not_evidence: >
+    冒烟只用 68 题子集，`overall/acc = 0.407` **不是**锚点，不可与 42~47 预期带比较。
+    该带的依据是 5,130 题全量回放（见 anchors）。
+  observed_response_length: >
+    boxed 下验证 resp_tokens mean 281 / median 262 / p95 605 / max 816（plain 的 median 是 4）。
+    小子集上未触及 1024 上限，但全量 @1024 归档的截断率是 7.93%，正式跑要盯 p95。
+  cleanup: "checkpoint（54 GB）与 rollouts 已删除；8 卡归零，无残留进程"
+
+activity_log:
+  - at: "2026-08-26T17:31:00+08:00"
+    what: >
+      冒烟通过后启动 477 步正式训练，driver PID 3750885。
+      启动横幅确认：477 步 / batch 64 / save_freq 25 / 评测每 25 步读
+      vsibench_val_boxed.parquet / 采样 / judge 在 8100。
+      下一件要确认的事是 step 0 是否落在 42~47 带。
+  - at: "2026-08-26T17:20:00+08:00"
+    what: >
+      按用户 2026-08-26 的四项决定登记本轮。落地了 boxed 所需的三处代码改动
+      （val parquet 后缀、boxed 优先判分、judge trust_boxed），构建了
+      vsibench_val_boxed.parquet 并逐行核对与 plain 只差后缀，
+      用归档 boxed 探针回放推算出 step 0 预期带 42~47。
+      新增 test_boxed_primary_scoring.py 全绿；test_thinking_split.py 因 teacher
+      thinking 翻转而改为机制/配置分离断言后全绿；
+      test_boxed_extraction / test_vsibench_in_training / test_val_metric_invariance /
+      test_validation_judge / test_cvbench_val_parity 全部复跑通过。
+
+handoff: >
+  **训练已在跑**（17:31 起，driver PID 3750885，node-A 8 卡，预计约 16.7 h 到 8-27 上午）。
+  日志 logs/train/_queue/vlm3r_epoch1_boxed_sample.log 与
+  logs/train/20260826_mvopsd_vlm3r_epoch1_boxed_sample/。
+  接管时第一件事：看 step 0 的 `val-core/vsibench/overall/acc` 是否落在 **42~47** 带，
+  以及 `val-aux/vsibench/boxed/frac` 是否约 0.92。
+  落在 53 附近 = boxed 后缀没生效（查 VAL_FILE 是否被指回 plain 那份）；
+  两者都对则曲线可以往下读。此后每 25 步一个点，重点盯 resp_tokens 的 p95
+  （20260824 在 25 步内就从 333 涨到 1024，这是本轮主风险）。
+
+next_action: >
+  ① step 0 出来后核对 42~47 预期带与约 0.92 合规率，两项都对再让它继续跑；
+  ② 前 100 步（step 25/50/75/100 四个点）判断长尾是否在变粗——若 resp_tokens p95
+  已顶到 1024 且 answered/frac 明显下滑，应考虑提前终止而不是烧完 16.7 h；
+  ③ 跑完后把 20 个点的走势、合规率轨迹与长尾指标写回本文件的 results 与 conclusion，
+  并判断是否需要退回单变量 arm 定位（本轮改了四项，不能归因到单项）。
+
+issues: []

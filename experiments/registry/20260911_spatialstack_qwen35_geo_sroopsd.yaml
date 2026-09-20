@@ -1,0 +1,161 @@
+experiment_id: 20260911_spatialstack_qwen35_geo_sroopsd
+title: "SpatialStack 几何 SFT 在 sr_opsd 重训（对齐 LESSON-041 / 67.65 栈）"
+status: completed
+
+created_at: "2026-09-11T22:15:00+08:00"
+finished_at: "2026-09-12T16:03:00+08:00"
+owner: cursor-window-spatialstack
+
+goal: >
+  20260909 几何 SFT 在 spatialstack-qwen35 完成（VSI boxed 66.59 / plain 66.63），
+  与历史 sr_opsd 上 67.65（lmms_legacy）不可当同环境复现。
+  按 README 同一配方在 conda sr_opsd 重训 1 epoch，训评同栈。
+hypothesis: >
+  配方与 20260909 相同，应再次训完约 3308 步。
+  lmms_legacy 应接近论文 67.65 带；boxed/plain 仅作 sr_opsd 侧对照，不可与 20260909 对减。
+
+code:
+  git_commit: b6eeb007a3e62bff5482accd6c4964f4a4e2700b
+  git_dirty: true
+
+environment:
+  conda_env: sr_opsd
+  python: /home/c30084464/miniconda3/envs/sr_opsd/bin/python
+  packages:
+    torch: 2.10.0+cu129
+    transformers: 5.3.0
+    flash_attn: 2.8.3
+    deepspeed: 0.16.4
+    triton: 3.6.0
+    fla: 0.4.1
+  nodes: node-A
+  hostname: dsw-455344-95d655c8f-xm7dq
+  gpus_per_node: 8
+  gpu_type: H20 95GiB
+  hf_offline: true
+
+model:
+  backbone: Qwen3.5-4B
+  model_path: /home/c30084464/Documents/code/SpatialStack_OPSD/models/Qwen3.5-4B
+  geometry_encoder: VGGT-1B
+  geometry_encoder_path: /home/c30084464/Documents/code/SpatialStack_OPSD/models/VGGT-1B
+
+data:
+  training_datasets:
+    - spar_234k%60
+    - llava_hound_64k%60
+    - vlm3r_scannet%60
+    - vsi_appr_order%50
+  note: "与 20260909_spatialstack_qwen35_geo 相同采样比例"
+
+training:
+  status: completed
+  entrypoint: scripts/train/train.sh
+  command: |
+    source ~/miniconda3/etc/profile.d/conda.sh
+    conda activate sr_opsd
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+    MODEL_PATH=$PWD/models/Qwen3.5-4B \
+    USE_GEOMETRY_ENCODER=True \
+    GEOMETRY_ENCODER_PATH=$PWD/models/VGGT-1B \
+    FEATURE_FUSION_METHOD=deepstack_language_add \
+    GEOMETRY_ENCODER_LAYERS="11 17 23" \
+    GEOMETRY_FUSION_LAYERS="0 1 2" \
+    DATA_FLATTEN=False \
+    OUTPUT_DIR=./output/spatialstack_qwen35_train_sroopsd \
+    bash scripts/train/train.sh
+  parameters:
+    seed: 0
+    learning_rate: 1.0e-5
+    total_batch_size: 64
+    per_device_train_batch_size: 1
+    world_size: 8
+    gradient_accumulation_steps: 8
+    epochs: 1
+    save_steps: 1000
+    max_length: 12800
+    feature_fusion_method: deepstack_language_add
+    geometry_encoder_layers: [11, 17, 23]
+    geometry_fusion_layers: [0, 1, 2]
+    use_geometry_encoder: true
+    data_flatten: false
+    use_vggt_image_preprocess: true
+    deepspeed: scripts/zero2_opt.json
+  artifacts:
+    output_dir: output/spatialstack_qwen35_train_sroopsd
+    driver_log: logs/train/20260911_spatialstack_qwen35_geo_sroopsd/driver.log
+    smoke_log: logs/train/20260911_spatialstack_qwen35_geo_sroopsd/smoke.log
+  results:
+    metrics:
+      smoke_global_step: 2
+      smoke_train_loss: 2.215
+      smoke_runtime_s: 72.46
+    summary: "1 epoch 完成 2026-09-12 07:38；global_step=3308 train_loss=0.5165 runtime=33495s"
+    failure_reason: ""
+
+evaluation:
+  status: completed
+  entrypoint: logs/eval/20260911_spatialstack_qwen35_geo_sroopsd/run_eval_chain.sh
+  engine: huggingface_lmms_eval
+  conda_env: sr_opsd
+  pythonpath: src
+  benchmarks:
+    - vsibench
+  parameters:
+    model: output/spatialstack_qwen35_train_sroopsd
+    arms:
+      boxed:
+        VSIBENCH_PROTOCOL: spatialstack
+        max_new_tokens: 4096
+      plain:
+        VSIBENCH_PROTOCOL: spatialstack_plain
+        max_new_tokens: 1024
+      lmms_legacy:
+        VSIBENCH_PROTOCOL: lmms_legacy
+        max_new_tokens: 16
+        comparable: "paper/upstream 67.65 band"
+  artifacts:
+    eval_root: logs/eval/20260911_spatialstack_qwen35_geo_sroopsd
+  results:
+    metrics:
+      boxed_overall: 66.21
+      plain_overall: 66.30
+      lmms_legacy_overall: 66.30
+      answered: 100.0
+    summary: >
+      lmms_eval 三口径全量 2026-09-12 16:03 收口。boxed/plain 与 20260909 差约 0.3–0.4 pp。
+      lmms_legacy 66.30 vs 论文 67.65 差 1.35 pp；plain 与 lmms_legacy 逐题型完全相同，待核对。
+    results_json:
+      boxed: logs/eval/20260911_spatialstack_qwen35_geo_sroopsd/vsibench_boxed/vsibench/output__spatialstack_qwen35_train_sroopsd/20260912_131847_results.json
+      plain: logs/eval/20260911_spatialstack_qwen35_geo_sroopsd/vsibench_plain/vsibench/output__spatialstack_qwen35_train_sroopsd/20260912_141312_results.json
+      lmms_legacy: logs/eval/20260911_spatialstack_qwen35_geo_sroopsd/vsibench_lmms_legacy/vsibench/output__spatialstack_qwen35_train_sroopsd/20260912_150836_results.json
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-12T16:05:00+08:00"
+  current_task: "无"
+  owner: cursor-window-spatialstack
+  active_job_id: ""
+  resources: "node-A 8 卡空闲"
+  blocker: ""
+  next_action: "可选：从 train_sroopsd 重跑 SPAR3 MV-OPSD；核对 plain vs lmms_legacy 同分"
+
+issues:
+  - id: ISSUE-001
+    status: resolved
+    symptom: "首次 eval 用 project cache/，HF offline 下找不到 VSI-Bench"
+    solution: "run_eval.sh 显式设 HUGGINGFACE_HUB_CACHE/HF_DATASETS_CACHE=~/.cache/huggingface/{hub,datasets}"
+    at: "2026-09-12T13:16:00+08:00"
+
+activity_log:
+  - at: "2026-09-12T13:17:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "修复 lmms_eval 缓存路径；smoke boxed PASS；启动 run_eval_chain.sh 三口径全量。"
+    result: "engine=lmms_eval via eval.sh；非 vLLM。"
+
+notes:
+  relation_to_20260909: >
+    配方相同、OUTPUT_DIR 不同（train_sroopsd vs spatialstack_qwen35_train）。
+    旧权重保留作 spatialstack-qwen35 对照，不作 canonical init。
+  readout_discipline: >
+    仅 lmms_legacy 与 67.65 可比；66.59/66.63 是另一环境的数字，禁止对减。

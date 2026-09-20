@@ -1,0 +1,77 @@
+experiment_id: 20260902_sparbench_tok2048
+title: "基座 + SPAR3 K=1 step 55：SPAR-Bench max_new_tokens=2048"
+status: completed
+completed_at: "2026-09-02T19:03:11+08:00"
+created_at: "2026-09-02T15:54:00+08:00"
+owner: cursor-window-mvopsd
+
+goal: >
+  旧 SPAR-Bench dump（step 55 = 6.63）是 lmms-eval 默认 max_new_tokens=100
+  且 until=\n\n，CoT 被截断。把预算改成 2048 并清空 until，同口径测基座
+  与 SPAR3 K=1 step 55。不可与 6.63 并列。
+
+protocol:
+  launcher: scripts/opsd/run_sparbench_tok2048.sh
+  conda_env: sr_opsd
+  SPARBENCH_MAX_NEW_TOKENS: "2048"
+  until: []
+  decoding: greedy
+  disable_thinking: true
+  model_impl: qwen3_5
+  hf_offline: true
+  scoring: lmms-eval 原版（MCA exact_match 整段，NA MRA，VCI 动作解析）
+
+arms:
+  base:
+    node: node-B
+    model: models/Qwen3.5-4B
+    output_root: logs/eval/20260902_qwen35base_sparbench_tok2048
+    results_json: logs/eval/20260902_qwen35base_sparbench_tok2048/sparbench/models__Qwen3.5-4B/20260902_155714_results.json
+    status: done
+    sparbench_score: 39.88
+    completed_at: "2026-09-02T16:17:31+08:00"
+  k1_step55:
+    node: node-A
+    hf: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+    output_root: logs/eval/20260902_spar3_k1_step55_sparbench_tok2048
+    results_json: logs/eval/20260902_spar3_k1_step55_sparbench_tok2048/sparbench/output__20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf/20260902_155713_results.json
+    status: done
+    sparbench_score: 13.87
+    completed_at: "2026-09-02T19:03:11+08:00"
+    delta_vs_base_pp: -26.01
+
+comparability:
+  do_not_mix:
+    - "20260901 step55 SPAR-Bench 6.63（100 tok + until=\\n\\n）"
+    - "本轮 2048 tok + until=[]"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-02T21:09:00+08:00"
+  current_task: "2048 tok 基座 39.88 / SPAR3 13.87 已落盘"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: "已 superseded：对外 SPAR 见 20260906_sparbench_vllm_lastline（vLLM lastline 39.72/42.16）"
+
+issues: []
+activity_log:
+  - at: "2026-09-02T19:03:11+08:00"
+    what: >
+      step55 完成 status=0，2.89h，official overall 13.87。
+      相对同口径基座 39.88 为 −26.01 pp。8 卡已释放。
+      注意 MCA 仍是整段 exact_match，CoT 会被罚；不是 boxed 口径。
+  - at: "2026-09-02T16:17:31+08:00"
+    what: >
+      基座臂完成 status=0，official overall 39.88（2048 tok + until=[]）。
+      node-B 8 卡已释放。step55 仍在 node-A。
+  - at: "2026-09-02T15:57:16+08:00"
+    what: >
+      两臂已起来。日志确认 [sparbench] max_new_tokens=2048 until=[]。
+      node-A wrapper 3426247（step55）；node-B wrapper 2008038（基座）。
+      缓存命中 sparbench_cache/jasonzhango___spar-bench。
+  - at: "2026-09-02T15:54:00+08:00"
+    what: >
+      登记并启动。SPARBENCH_MAX_NEW_TOKENS=2048，until=[]。
+      node-B 无 step55 HF，故基座放 node-B、step55 放 node-A。

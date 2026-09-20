@@ -1,0 +1,255 @@
+experiment_id: 20260909_spatialstack_mvopsd_spar3_student_k
+title: "SpatialStack 几何权重 + SPAR3 nested K=1/K=2 MV-OPSD（HF generate，非 vLLM）"
+status: completed
+
+created_at: "2026-09-09T22:53:00+08:00"
+started_at: "2026-09-09T22:53:00+08:00"
+owner: "cursor-window-spatialstack"
+
+goal: >
+  在 SpatialStack Qwen3.5+VGGT 几何融合权重上，复用 20260831 SPAR3 nested
+  K=1/K=2 协议跑 MV-OPSD。老师始终 3 视角；学生 K=1 与 K=2 同题嵌套。
+  引擎是 HF generate，不能与历史 vLLM SPAR3 分数对减。
+
+hypothesis: >
+  几何融合初始化下，K=1 相对本臂 step 0 仍可能有增益；K=2 缩小 N/K 后
+  增益不应系统性差于 K=1。若两臂相对自身 step 0 走平，则问题不在 student 视角数。
+
+relations:
+  init_from: 20260909_spatialstack_qwen35_geo
+  protocol_copy: 20260831_mvopsd_spar3_student_k
+  engine: hf_generate  # not vLLM; VGGT custom class
+
+design:
+  why_matched_pool: >
+    与 20260831 相同：交集 4,380，train 4,064 / holdout 316；K=1 ⊂ K=2。
+  train_rows: 4064
+  teacher_views: 3
+  arms:
+    k1:
+      experiment_name: 20260909_spatialstack_mvopsd_spar3_k1
+      node: node-B
+      k_views_student: 1
+      mean_ratio: 3.0
+      train_file: data/mvopsd/parquet_spar3_k1/main_train.parquet
+    k2:
+      experiment_name: 20260909_spatialstack_mvopsd_spar3_k2
+      node: node-A
+      k_views_student: 2
+      mean_ratio: 1.5
+      train_file: data/mvopsd/parquet_spar3_k2/main_train.parquet
+      start_after: "node-A SpatialStack VSI dual eval PGID 1408911"
+  total_steps: 84   # 4,064 行 / batch 48 ≈ 1 epoch（原 63 步是 batch 64 的算法）
+  epochs: 1.0
+  test_freq: 7      # 与 batch 64 下的 5 步同采样量
+  save_freq: 7
+  gpu_layout:
+    k2_node_a: "8 卡；与外部作业共卡（每卡约 25.8GB，剩 ~72GB/卡）"
+    k1_node_b: "GPUS=0,1,2,3,4,5；6-7 被外部作业各占 91GB（ISSUE-005）"
+    batch_rationale: "48 同时被 6 与 8 整除，两臂全局 batch 一致，可比"
+  max_actor_ckpt_to_keep: 3
+  shared_protocol:
+    - "MODEL_PATH=output/spatialstack_qwen35_train"
+    - "ROLLOUT_NAME=hf"
+    - "geometry_encoder frozen; fusion+LLM train"
+    - "teacher_enable_thinking=False; student enable_thinking=false"
+    - "lr 2e-6 / batch 48 / rollout.n=1 / frozen teacher"
+    - "VAL_FILE=vsibench_val_boxed_lastline_sub480.parquet（训练内曲线；全量 5130 行离线补测）"
+    - "VAL_DO_SAMPLE=1 t=1.0 top_p=0.8"
+    - "JUDGE=0"
+    - "data.val_batch_size=48 = train batch（HF 32-frame；不是 vLLM 的 256）"
+    - "rollout.agent.num_workers = 实际卡数（否则 agent loop chunk 不整除直接挂）"
+  smoke:
+    file: data/eval/vsibench_verl/vsibench_val_boxed_lastline_smoke8.parquet
+    steps: 2
+    batch: 8
+    gates:
+      - "loads Qwen3_5ForConditionalGenerationWithGeometry"
+      - "policy_fallback_fraction=0"
+      - "teacher_image_swap_fraction=1.0"
+      - "k1 k_views_student/1/frac=1.0"
+      - "teacher_probe constant and != Qwen-base 0.044569..."
+      - "vopd_loss nonzero"
+
+read_rules:
+  - "每臂只相对自己的 step 0"
+  - "k1 vs k2 可同协议比较"
+  - "不可与 lmms-eval boxed 48.06 / plain 52.75 对减"
+  - "不可与 20260831 vLLM SPAR3 46.27/49.23 对减"
+
+launch:
+  k1_smoke:
+    node: node-B
+    env: "system python3.12 + ~/.local (LESSON-030)"
+    command: |
+      env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL \
+          -u CONDA_PYTHON_EXE -u CUDA_VISIBLE_DEVICES \
+          PATH=/usr/bin:/usr/local/bin:/bin \
+        ARM=k1 SMOKE=1 bash scripts/opsd/launch_spatialstack_spar3_mvopsd.sh
+  k1:
+    node: node-B
+    env: "system python3.12 + ~/.local"
+    command: |
+      env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL \
+          -u CONDA_PYTHON_EXE -u CUDA_VISIBLE_DEVICES \
+          PATH=/usr/bin:/usr/local/bin:/bin \
+        ARM=k1 bash scripts/opsd/launch_spatialstack_spar3_mvopsd.sh
+  k2:
+    node: node-A
+    env: "conda vision-opd (ISSUE-702: node-A ~/.local ABI 不可用)"
+    command: |
+      source ~/miniconda3/etc/profile.d/conda.sh
+      conda activate vision-opd
+      env -u CUDA_VISIBLE_DEVICES \
+        ARM=k2 bash scripts/opsd/launch_spatialstack_spar3_mvopsd.sh
+    queued_with: |
+      setsid nohup bash scripts/opsd/tools/chain_after.sh 1408911 80000 -- \
+        bash -lc 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate vision-opd && cd /home/c30084464/Documents/code/SpatialStack_OPSD && env -u CUDA_VISIBLE_DEVICES ARM=k2 bash scripts/opsd/launch_spatialstack_spar3_mvopsd.sh' \
+        > logs/train/20260909_spatialstack_mvopsd_spar3_k2/queue.log 2>&1
+
+handoff:
+  current_phase: full_set_offline_eval
+  last_updated: "2026-09-10T11:26:00+08:00"
+  current_task: "完整 FSDP（k1/k2 的 70/77/84）全集 VSI boxed；当前 k2-84，其余排队"
+  owner: cursor-window-spatialstack
+  active_job_id:
+    node_a_k2_step84_eval: 2617825
+    node_a_saved_vsi_queue: 2779060
+    node_b_k1_merge_70_77: 2776767
+  in_loop_val:
+    set: vsibench_val_boxed_lastline_sub480.parquet   # 480 行，不是全量 5130
+    decoding: sample t=1.0 top_p=0.8
+    k2_step0: 0.6391
+    k2_step84: 0.6411
+    k1_step0: 0.6416
+    k1_step84: 0.6100
+  offline_eval:
+    engine: huggingface_lmms_eval   # 不能用 vLLM，见 ISSUE-009
+    protocol: spatialstack boxed last-line greedy @4096 / 32 帧（对齐 geo SFT 66.59）
+    complete_fsdp_steps: [70, 77, 84]
+    skipped: "global_step_7..63 仅 data.pt；smoke global_step_2"
+    queue: "k2-84 (running) -> k2-77 -> k2-70 -> k1-84 -> k1-77 -> k1-70"
+    k2_hf:
+      "84": output/20260909_spatialstack_mvopsd_spar3_k2_global_step_84_hf
+      "77": output/20260909_spatialstack_mvopsd_spar3_k2_global_step_77_hf
+      "70": output/20260909_spatialstack_mvopsd_spar3_k2_global_step_70_hf
+    k1_hf:
+      "84": output/20260909_spatialstack_mvopsd_spar3_k1_global_step_84_hf
+      "77": output/20260909_spatialstack_mvopsd_spar3_k1_global_step_77_hf
+      "70": output/20260909_spatialstack_mvopsd_spar3_k1_global_step_70_hf
+  next_action: |
+    盯 queue_saved_vsi.log 与各 step 的 vsibench_boxed/run.log。
+    训练内 sub480 与全量 5130 不可并列相减。
+
+issues:
+  - id: ISSUE-001
+    status: resolved
+    symptom: "node-B smoke/k1 在 init_model 立刻 ImportError: Qwen3_5DynamicCache"
+    evidence: "logs/train/20260909_spatialstack_mvopsd_spar3_k1_smoke/queue.log；transformers 5.5.0"
+    root_cause: "几何类按 SpatialStack 训练环境 transformers 5.3.0 导入；OPSD 环境是 5.5，该类已并入 DynamicCache"
+    solution: "modeling_qwen3_5.py 对 Qwen3_5DynamicCache 做 try/except 回退 DynamicCache"
+    prevention: "几何类跨 5.3/5.5 导入必须有兼容分支，smoke 先过再 chain 正式臂"
+  - id: ISSUE-002
+    status: resolved
+    symptom: "smoke val_before_train：processor IndexError index 32 size 32"
+    evidence: "geometry_hf_rollout.py:146 → qwen3_vl/processing_qwen3_vl.py:132"
+    root_cause: "generate 把已展开 image-pad 的 prompt_ids decode 后再交给 processor，占位符数量与 32 张图对不上"
+    solution: "processor 只喂 len(images) 个 <image> 占位，pixel_values 配原始 input_ids"
+    prevention: "HF generate 不要把 tokenized 多模态 prompt decode 回 processor"
+  - id: ISSUE-003
+    status: resolved
+    symptom: "smoke3 首次几何 forward: AssertionError Input image height 480 is not a multiple of patch height 14"
+    evidence: "vggt/layers/patch_embed.py:69；view 被按 480 送进 VGGT 而非 grid*14"
+    root_cause: |
+      verl/utils/qwen35_geometry.py 的 geometry_patch_size 从 vision_config 读 patch_size=16，
+      那是 Qwen 视觉塔的 patch；VGGT 自己的 patch 是 14。权威值见
+      src/qwen_vl/data/utils.py GEOMETRY_ENCODER_PATCH_SIZE=14 与
+      lmms_eval/models/qwen3_5.py build_qwen3_5_geometry_inputs(patch_size=14)。
+    solution: "写死 GEOMETRY_ENCODER_PATCH_SIZE=14，view resize 到 grid_h*14 x grid_w*14"
+    verification: |
+      CPU 形状核对（VSI 32 帧 640x480）：grid=[1,30,40] -> geometry 420x560，
+      H%14=W%14=0，几何 token 9600 == 视觉 merge 后 token 9600。
+    prevention: |
+      几何编码器的 patch 尺寸只能取 VGGT 的 14，不要从 vision_config 推断；
+      改动几何输入构造后先做一次 CPU 形状核对（token 数两侧相等）再烧 smoke。
+  - id: ISSUE-004
+    status: resolved
+    symptom: "HF generate 首次 prefill: AttributeError 'Tensor' object has no attribute 'has_previous_state'"
+    evidence: "transformers/generation/utils.py:3768 _prefill → 我方 Qwen3_5TextModelWithGeometry.forward"
+    root_cause: |
+      modeling_qwen3_5.py 调 self._update_linear_attn_mask(attention_mask, cache_position)。
+      该私有方法 5.3 收 cache_position（判 cache_position[0] > 0），
+      5.5 改收 past_key_values（判 past_key_values.has_previous_state()），
+      于是 Tensor 被当成 Cache。谓词语义相同，只是入参换了对象。
+    solution: |
+      按 inspect.signature(Qwen3_5TextModel._update_linear_attn_mask) 的末位参数名分派，
+      是 past_key_values 就传 cache，否则传 cache_position（_LINEAR_ATTN_MASK_ARG）。
+    verification: |
+      scripts/opsd/tools/check_geometry_generate.py 8：单卡 generate 24 token 正常出答案。
+    prevention: |
+      跨 5.3/5.5 复用 transformers 私有方法要按签名分派，不能按位置硬传；
+      generate 链路改动先跑 check_geometry_generate.py（约 1 分钟），不要用整轮 smoke 试错。
+  - id: ISSUE-005
+    status: resolved
+    symptom: "node-B k1 在 init_model 就 CUDA OOM：GPU0 只剩 553MiB"
+    evidence: |
+      nvidia-smi：node-B GPU6/7 各被 pid 905473/905474 占 91,454MiB，
+      ps 查不到这两个 pid（外部 PID 命名空间，不是我们的残留，不能清）。
+      node-A 也有一个外部 8 卡作业，每卡约 25.8GB，但仍剩 ~72GB/卡。
+    root_cause: "整机 8 卡被默认占满的假设不成立；共卡节点必须显式限定可用卡"
+    solution: |
+      launch_spatialstack_spar3_mvopsd.sh 加 GPUS 开关：
+      GPUS=0,1,2,3,4,5 时置 CUDA_VISIBLE_DEVICES 并传 trainer.n_gpus_per_node=6，
+      SMOKE_BATCH 默认取 NGPUS；TRAIN_BATCH_SIZE 默认 48（6 与 8 皆整除），
+      不整除直接退出而不是让 verl 在几分钟后报 chunk 错。
+    prevention: |
+      开跑前先看 nvidia-smi per-GPU 占用与 compute-apps，别只看进程表；
+      ps 查不到的 GPU 占用属于其他命名空间，绕开它而不是 kill；
+      共卡时 batch 必须能被实际卡数整除，改卡数就要同步改 batch 与 total_steps。
+  - id: ISSUE-006
+    status: resolved
+    symptom: "node-B 6 卡 smoke：AssertionError only support equal chunk. Got size of DataProto 6 and chunk 8"
+    evidence: "queue6.log:1679；overrides 里 rollout.agent.num_workers=8，batch=6"
+    root_cause: "run_mvopsd.sh 把 agent.num_workers 硬写成 8；agent loop 按 worker 数切 batch"
+    solution: "run_mvopsd.sh 改用 AGENT_WORKERS（默认 8），launch 脚本传实际卡数"
+    prevention: "凡是按 batch 切分的并行度（n_gpus / agent workers / mini-batch）都要跟卡数一起改"
+  - id: ISSUE-007
+    status: resolved
+    symptom: "k2 正式跑卡在 val_before_train，8 分钟只走 9 个 batch"
+    evidence: |
+      全量 VSI 验证集 5130 行，val_batch_size=8，HF generate 约 53-60s/batch
+      → 单次验证约 9.4 小时；test_freq=7 共 13 次验证，训练根本走不完。
+      对比：vLLM 时代 val_batch_size=256 才撑得住全量。
+    root_cause: "沿用 vLLM 时代的全量验证集，没换算 HF generate 的吞吐"
+    solution: |
+      新增 scripts/opsd/tools/make_vsibench_val_subset.py，按 question_type 分层、
+      seed=20260909 固定抽 480 行（6 与 8 皆整除），两臂共用同一文件；
+      val_batch_size 提到 48 摊薄每轮开销；全量 5130 行留给离线补测 checkpoint。
+    prevention: |
+      换推理引擎后必须先按 秒/样本 × 样本数 × 验证次数 估验证总时长再开跑；
+      训练内验证用固定分层子集，全量只用于离线对照。
+  - id: ISSUE-008
+    status: resolved
+    symptom: "node-A 同时有两个 k2 在跑，抢同一批卡"
+    evidence: |
+      ps 显示 main_ppo 2045977(23:35, 全量验证那次) 与 2117632(23:46, 新配置) 并存；
+      每卡显存 51GB = 两个 run + 外部作业。
+    root_cause: |
+      之前那条 pkill 命令在工具 shell 里空返回（179ms、无任何输出），
+      实际没执行，但我按“pgrep 无输出”当成清理成功了。
+    solution: "按 ps 的 lstart 区分新旧，kill 旧 run 的 main_ppo 与 TaskRunner 根进程"
+    prevention: |
+      清理必须以“再查一次进程表并看到目标消失”为准，
+      不能以命令没报错或 pgrep 空输出为准；kill 后单独复查 ps -o pid,lstart。
+  - id: ISSUE-009
+    status: wontfix_use_hf
+    symptom: "用户要求把离线推理改成 vLLM，以便跑全量 5130 而不是训练内 sub480"
+    evidence: |
+      权重 architectures=Qwen3_5ForConditionalGenerationWithGeometry，含 VGGT
+      与 language_feature_fusion。vLLM 0.18.0 只认标准 Qwen3.5，没有
+      geometry_encoder_inputs 通路；训练 rollout 因此写死 ROLLOUT_NAME=hf。
+    root_cause: "几何融合是自定义 HF 类，不是 vLLM 注册模型"
+    solution: |
+      不把几何权重塞进 vLLM（会退化成没 VGGT 的另一模型）。
+      FSDP merge 后走与 geo SFT 相同的 HF/lmms-eval 全量 5130 boxed last-line。
+    prevention: "几何 checkpoint 的离线评测默认 lmms-eval；vLLM 只用于无几何的 Qwen 基座/SPAR3"

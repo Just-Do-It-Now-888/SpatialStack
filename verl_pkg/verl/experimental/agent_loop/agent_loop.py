@@ -748,6 +748,14 @@ class AgentLoopWorker:
         if image_grid_thw is not None:
             images_seqlens = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])
             multi_modal_inputs["images_seqlens"] = images_seqlens
+        if images:
+            from verl.utils.qwen35_geometry import attach_geometry_encoder_inputs
+
+            attach_geometry_encoder_inputs(
+                multi_modal_inputs,
+                images,
+                config=getattr(self.processor, "config", None),
+            )
         return multi_modal_inputs
 
     def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs) -> torch.Tensor:

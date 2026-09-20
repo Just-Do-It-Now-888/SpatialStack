@@ -8,12 +8,19 @@
 
 ## 已完成
 
+- [Self-Distilled Reasoner: On-Policy Self-Distillation for Large Language Models](papers/opsd.md)
+  - 标识：arXiv:2601.18734
+  - 年份与会议：2026；arXiv 预印本
+  - 状态：已完成（论文正文公式与完整消融表待核对；公开 README 已读）
+  - 一句话摘要：同一模型作学生与教师，学生只看题目、教师额外看 ground-truth solution，在学生 on-policy 轨迹上做 token 级 JSD 自蒸馏。
+  - 最后更新：2026-09-19
+
 - [Vision-OPD: Learning to See Fine Details for Multimodal LLMs via On-Policy Self-Distillation](papers/vision-opd.md)
   - 标识：arXiv:2605.18740
   - 年份与会议：2026；arXiv 预印本（v4）
-  - 状态：已完成（实现细节有待核对项）
+  - 状态：已完成（评测配置已由公开代码核实；训练实现细节仍有待核对项）
   - 一句话摘要：以同一 MLLM 的证据裁剪视图为教师、带框全图视图为学生，在学生 rollout 上做 token 级 JSD 自蒸馏，无需答案标签或推理时 zoom 即提升细粒度视觉理解。
-  - 最后更新：2026-08-13
+  - 最后更新：2026-08-20
 
 - [VOLD: Reasoning Transfer from LLMs to Vision-Language Models via On-Policy Distillation](papers/vold.md)
   - 标识：arXiv:2510.23497

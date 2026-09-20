@@ -12,7 +12,11 @@ defaults:
 
 actor_rollout_ref:
   model:
-    path: ./output/spatialstack_qwen35_novggt_aligned
+    # Released Qwen3.5-4B, matching Vision-OPD (scripts/run_vision_opd.sh:16).
+    # Starting from the spatial SFT checkpoint instead would distill on data the
+    # student has already fitted, which is what collapsed the JSD to ~0.01 in the
+    # first run.
+    path: ./models/Qwen3.5-4B
     override_config:
       # flash_attn 2.7.4.post1+25.11 in this image raises "Cannot access data
       # pointer of Tensor that doesn't have storage" for every non-causal
@@ -22,7 +26,7 @@ actor_rollout_ref:
       # use_remove_padding packs sequences and needs varlen attention.
       vision_attn_implementation: sdpa
   actor:
-    # 64 prompts x 4 rollouts = 256 sequences per step, one mini-batch, so the
+    # 64 prompts x 1 rollout = 64 sequences per step, one mini-batch, so the
     # update stays strictly on-policy.
     ppo_mini_batch_size: 64
     ppo_micro_batch_size_per_gpu: 1
@@ -31,12 +35,47 @@ actor_rollout_ref:
     self_distillation:
       teacher_always_on: True
       teacher_image_key: teacher_images
+      # False since 2026-08-26: both sides non-thinking, which is Vision-OPD's
+      # original setting. Setting this to True was the single cause of the
+      # response-length explosion that killed the 20260821 arms -- the
+      # 20260824_teacher_thinking_off single-variable arm moved VSI rule_only
+      # from 20.85 to 52.57 at step 25 by flipping this one field, with training
+      # response length 821 -> 221 and clip_ratio 0.50 -> 0.016 (LESSON-029).
+      #
+      # Do not read that as the method working: the same arm still drifted
+      # 53.38 -> 52.57 and its validation resp_tokens p95 grew 333 -> 1024, so
+      # what was removed was the damage, not the absence of gains.
+      #
+      # The paragraph below describes the True setting and is kept because it
+      # explains what the flag does, not what it is set to:
+      #
+      # Only the teacher's chat template moves: data.apply_chat_template_kwargs
+      # keeps enable_thinking false, so student rollouts and every validation
+      # pass still get the pre-closed <think>\n\n</think>\n\n block, while the
+      # teacher's generation prompt ends with an open <think>\n.
+      #
+      # The teacher is never sampled here -- it scores the student's tokens by
+      # teacher forcing -- so this changes which distribution the student is
+      # matched against: the teacher's reasoning-mode next-token distribution
+      # rather than its answer-mode one. Watch self_distillation/* JSD against
+      # the previous runs' 0.018-0.022 plateau; a level shift is expected and is
+      # not by itself evidence about the method.
+      teacher_enable_thinking: False
       # Must stay null. "answer_hint" switches to a text-hint teacher, which is
       # a different method entirely (ray_trainer.py:1168).
       teacher_prompt_mode: null
       teacher_model_source: legacy
-      teacher_regularization: ema
-      teacher_update_rate: 0.05
+      # Frozen, not EMA. With an EMA teacher the target follows the student, so
+      # "the student matched the teacher" says nothing about whether either one
+      # is right -- v0 drove vopd_loss to 0.003 while its answers drifted to
+      # 170-word prose (LESSON-009, LESSON-012). Frozen keeps the target at the
+      # released Qwen3.5-4B's N-view posterior for the whole run, which is the
+      # only fixed quantity in the setup. Watch self_distillation/teacher_probe:
+      # it is constant iff the teacher really is not moving.
+      teacher_regularization: frozen
+      # Ignored under frozen; pinned to 0.0 so the config cannot read as if an
+      # EMA were still running.
+      teacher_update_rate: 0.0
       full_logit_distillation: True
       distillation_topk: 100
       distillation_add_tail: True
@@ -49,14 +88,25 @@ actor_rollout_ref:
       # Fail loudly if a sample reaches the teacher without its views, instead of
       # silently training something we cannot describe.
       fallback_to_policy_loss_on_missing_teacher: False
-    # Required, not optional: under the default token-mean, SPAR 3-view would
-    # take 57% of the gradient with 27% of the samples, while vlm3r_scannet
-    # (1-token answers, closest to VSI-Bench) would get under 1%.
-    loss_agg_mode: seq-mean-token-mean
+    # verl default, and what Vision-OPD's released config uses. The plan argued
+    # for seq-mean-token-mean on the grounds that SPAR 3-view would otherwise
+    # take 57% of the gradient and vlm3r_scannet under 1%, but that estimate
+    # used ground-truth answer lengths. Distillation loss only covers tokens the
+    # student generates, and the student writes prose everywhere: measured over
+    # v1's 23.5K rollouts the real spread is 38.6% vs 25.5%, against sample
+    # shares of 27.8% and 24.4%. See LESSON-016.
+    loss_agg_mode: token-mean
     optim:
       lr: 2.0e-6
   rollout:
-    n: 4
+    # One rollout per prompt (user decision 2026-08-21). The vopd loss matches
+    # the student against the teacher on the student's own tokens, sample by
+    # sample; nothing in it compares rollouts of the same prompt, so n>1 only
+    # buys correlated samples at n times the generation cost. adv_estimator is
+    # still grpo, but only to skip the critic -- with a group of one,
+    # compute_grpo_outcome_advantage returns the raw score and the vopd branch
+    # ignores advantages anyway.
+    n: 1
     calculate_log_probs: True
     # Must be >= max(N, K); vLLM rejects prompts above this image count.
     limit_images: 40
@@ -64,6 +114,23 @@ actor_rollout_ref:
     # so vLLM only gets a third of the card.
     gpu_memory_utilization: 0.35
     max_model_len: 8192
+    # These are verl's defaults, pinned because the in-training CV-Bench number
+    # is only comparable to logs/eval/.../cvbench/ if it is greedy and unrepeated,
+    # matching the task yaml's temperature 0 / do_sample false.
+    val_kwargs:
+      temperature: 0
+      top_p: 1.0
+      top_k: -1
+      do_sample: False
+      n: 1
+      # Validation-only length caps. null inherits rollout.prompt_length, which
+      # interpolates from data.max_prompt_length (4096) and is sized for training.
+      # A 32-frame VSI-Bench question is ~9.85k tokens, and going over this limit
+      # does not fail -- agent_loop.py:338-346 silently truncates the prompt, which
+      # would drop most of the frames and score the model on a clip it never saw.
+      # run_mvopsd.sh raises it to 11264 whenever the VSI-Bench val set is in use.
+      prompt_length: null
+      response_length: 4096
 
 algorithm:
   # Only used to skip the critic; the vopd loss ignores advantages.
@@ -74,11 +141,30 @@ algorithm:
 
 data:
   train_files: ["./data/mvopsd/parquet/main_train.parquet"]
-  val_files: []
+  # CV-Bench in verl's schema, built by scripts/opsd/build_cvbench_val_parquet.py.
+  # Scoring it here rather than after the run is what makes early stopping
+  # possible: v0 trained for eight hours before anyone could see that the
+  # benchmarks had collapsed while vopd_loss fell to 0.003.
+  #
+  # Rebuilt 2026-08-18 with --prompt-style lmms_eval, so the question asked here
+  # is byte-identical to the offline CVBENCH_PROTOCOL=spatialstack default.
+  # v1 and rollout8 were scored on the dataset's own "(A) 3" wording; rebuild with
+  # build_cvbench_val_parquet.py --prompt-style native to reproduce that curve.
+  val_files: ["./data/eval/cvbench_verl/cvbench_val.parquet"]
   train_batch_size: 64
+  # verl prints a deprecation notice for this and would otherwise send all 2,638
+  # rows to the engines as one request, but _create_dataloader still honours it.
+  # Chunking is deliberate: val_before_train means the very first thing the run
+  # does is this generate call, and an OOM there wastes the whole launch.
+  val_batch_size: 256
+  # Keep the validation_data_dir dumps in a stable row order so generations can
+  # be diffed across steps; accuracy is order-independent either way.
+  validation_shuffle: False
   image_key: images
   max_prompt_length: 4096
-  max_response_length: 512
+  # 512 was sized for the SFT model, which answered in ~30 tokens. The released
+  # base model is not tuned to this answer format, so it needs Vision-OPD's 1024.
+  max_response_length: 1024
   # verl defaults to 14; Qwen3.5 uses patch 16 / merge 2, so the alignment factor
   # is 32. At 14 the student's views get resized to 392x504 while the teacher's
   # stay 384x512, which silently reintroduces resolution as a second privileged
@@ -90,12 +176,33 @@ data:
   truncation: error
   shuffle: True
   seed: 20260816
+  # Student side, and validation with it: the agent loop and RLHFDataset both
+  # render prompts with these kwargs, for training rollouts and every in-loop
+  # benchmark pass alike. The teacher overrides only enable_thinking, via
+  # actor.self_distillation.teacher_enable_thinking.
   apply_chat_template_kwargs:
     enable_thinking: false
 
 custom_reward_function:
   path: ./scripts/opsd/mvopsd_reward.py
   name: compute_score
+  reward_kwargs:
+    # word_boundary: our hardened parser (default). lmms_legacy: first [A-F] byte.
+    cvbench_parser: word_boundary
+    # Read the VSI-Bench answer from inside \boxed{} when the response has one,
+    # and fall back to the ordinary parser when it does not (user decision
+    # 2026-08-26). Only meaningful against a val set built with
+    # --prompt-suffix, i.e. vsibench_val_boxed.parquet; on a plain val set the
+    # base model boxes 0.3% of rows so this is very nearly a no-op, but it is
+    # still off by default so every curve published before today reproduces
+    # without setting it (LESSON-013).
+    #
+    # Why prefer the box: the fallback parser scans the whole response, and on a
+    # boxed prompt the response is ~300 tokens of reasoning around a one-token
+    # answer. That is exactly the shape where the tail scan produces false
+    # positives -- a truncated "Image 178: Kitchen." enumeration scored full
+    # marks against a 173 cm gold answer (ISSUE-306 era).
+    vsibench_boxed_primary: True
 
 trainer:
   n_gpus_per_node: 8
@@ -104,9 +211,93 @@ trainer:
   # v0 budget: 300 steps x 64 prompts = 19,200 samples, 14% of the pool. If the
   # signal is there, resume from the checkpoint rather than rebuilding data.
   total_training_steps: 300
-  save_freq: 50
-  test_freq: -1
-  val_before_train: False
-  logger: ["console"]
+  # Keep equal to test_freq so each scored step has a checkpoint. run_mvopsd.sh
+  # defaults SAVE_FREQ=TEST_FREQ when SAVE_FREQ is unset.
+  save_freq: 15
+  # Score CV-Bench every 15 steps (save_freq follows test_freq). Each eval pass
+  # runs 2,638 rows through the rollout engines and costs several minutes.
+  test_freq: 15
+  # The step-0 point is the released Qwen3.5-4B on the same harness, i.e. the
+  # baseline v0 shipped without. Every later point is only interpretable
+  # relative to it.
+  val_before_train: True
+  # Intermediate variables (vopd_loss, the self_distillation/* series, grad_norm,
+  # response length and clip ratio) are already logged every step; they only
+  # become watchable once a backend other than console is on.
+  logger: ["console", "wandb"]
+  # Sample answers next to the accuracy curve. v0's VSI-Bench zero turned out to
+  # be an answer-format problem, which no scalar would have revealed.
+  log_val_generations: 16
+  validation_data_dir: ./logs/val/20260816_qwen35base_mvopsd_v0_main
   project_name: MV-OPSD
-  experiment_name: 20260816_qwen35_mvopsd_v0_main
+  experiment_name: 20260816_qwen35base_mvopsd_v0_main
+  # In-training validation is rule-only by default (user decision 2026-08-27):
+  # vsibench_boxed_primary scores from \boxed{} when present, otherwise the
+  # spatialstack parser; unparsed rows stay at 0. No judge server is started
+  # unless run_mvopsd.sh is launched with JUDGE=1. Wandb and other trackers
+  # omit judge-tier aux metrics even when JUDGE=1 (see ray_trainer._tracker_metrics).
+  #
+  # The block below is the optional second tier. gpt-oss-120b does not fit next
+  # to the policy, so run_mvopsd.sh parks it on the same eight cards in vLLM
+  # sleep mode and the two take turns -- see scripts/opsd/mvopsd_judge.py.
+  validation_judge:
+    # run_mvopsd.sh sets this True only when JUDGE=1; yaml default stays False.
+    enable: False
+    # extract (default since 2026-08-23, user decision): the judge extracts an
+    # option letter or a number from *every* VSI-Bench row and that is the
+    # reported score, so it can lower a row as well as raise it. The rule tier
+    # is still logged as val-core/vsibench/rule_only/acc, but as a diagnostic:
+    # on a degraded model it reads frame indices out of `Image N:` enumerations
+    # and scores them as full marks (23.00 vs 7.37 on the same 5,130 responses
+    # from llava_hound step 100).
+    #
+    # Cost: one judge call per row. Offline this was 12-13 min for 5,130 rows on
+    # four cards, on top of ~18 min of generation, so a TEST_FREQ=25 eval point
+    # goes from ~18 min to ~31 min.
+    #
+    # cascade: the previous behaviour, kept to reproduce every curve published
+    # before 2026-08-23 -- rules score first and only rows where no answer could
+    # be read reach the judge, which can therefore only add points. min_rows
+    # applies to that mode only; strict has to grade everything or the number is
+    # not the strict tier.
+    mode: extract
+    # The fallback half of vsibench_boxed_primary, on the judge side. A row with
+    # a closed \boxed{} has already been scored from inside the box, so sending
+    # it here could only replace that with an answer read out of the surrounding
+    # reasoning. Rows with no box are still graded strictly.
+    #
+    # Two consequences worth watching rather than assuming:
+    #   * cost drops with compliance. At the base model's ~92% boxed rate only
+    #     ~8% of rows reach the judge, so a strict eval point gets much cheaper
+    #     than the 12-13 min measured over all 5,130 rows.
+    #   * the reported number is a *mixture* of two tiers, and the mixing weight
+    #     is the compliance rate. val-aux/vsibench/boxed/frac is therefore a
+    #     required read: if compliance falls during training the score changes
+    #     tier composition, which would otherwise look like a model change.
+    trust_boxed: True
+    # Whole-string number or option letter: same as a closed box -- the rule tier
+    # already read the only token(s) and the judge mostly returns NONE on them.
+    trust_terse: True
+    # MCA last-line verdicts (C / C. option / unique option body) skip the judge.
+    trust_mca_tail: True
+    api_base: http://127.0.0.1:8100/v1
+    model: judge
+    max_tokens: 2048
+    parallel_workers: 256
+    # Below this many unresolved rows the rule verdict stands: paging in 61 GB of
+    # weights to settle a handful of rows costs more wall clock than the rows
+    # move the metric. answered/frac still reports them as unresolved.
+    min_rows: 16
+    # Level 1 offloads the weights to host RAM (61 GB of 1.6 TB), level 2 drops
+    # them and rebuilds from disk. Level 2 looks cheaper and silently corrupts
+    # this MXFP4 checkpoint: it wakes healthy and replies "!!!!!!!!" to
+    # everything. Verify with scripts/opsd/tools/check_judge_handshake.py before
+    # changing this.
+    sleep_level: 1
+    # Empty means the gpt-oss knob is not sent, as upstream Vision-OPD does.
+    reasoning_effort: ""
+    # Send every CV-Bench row to the judge, not just the unresolved ones, and
+    # report how often it disagrees with the rule tier. Scores still come from
+    # the rules wherever they read an answer, so this measures the cheap tier
+    # rather than replacing it. Off by default: it costs one judge call per row.
+    audit_all_rows: False

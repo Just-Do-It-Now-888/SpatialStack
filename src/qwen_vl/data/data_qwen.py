@@ -500,6 +500,9 @@ class LazySupervisedDataset(Dataset):
                         file,
                         self.data_args.image_processor,
                         model_type=self.model_type,
+                        use_vggt_preprocess=getattr(
+                            self.data_args, "use_vggt_image_preprocess", True
+                        ),
                     )
                     image.append(ret["pixel_values"])
                     geometry_encoder_inputs.append(ret["geometry_encoder_inputs"])

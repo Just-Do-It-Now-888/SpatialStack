@@ -7,18 +7,22 @@ output_type: generate_until
 doc_to_visual: !function utils.cvbench_doc_to_visual
 doc_to_text: !function utils.cvbench_doc_to_text
 doc_to_target: "answer"
-generation_kwargs:
-  max_new_tokens: 16
-  temperature: 0
-  top_p: 1.0
-  num_beams: 1
-  do_sample: false
+# Prompt, answer budget and parser all move together, selected by
+# CVBENCH_PROTOCOL (default "spatialstack", matching the training loop; set
+# "lastline" for SPAR wording without \\boxed{}; set "lmms_legacy" for
+# upstream's 16-token protocol). Kept in utils.py rather than
+# spelled out here so no run can mix one protocol's prompt with the other's
+# budget -- see the comment above CVBENCH_GENERATION_KWARGS.
+generation_kwargs: !function utils.CVBENCH_GENERATION_KWARGS
 # The return value of process_results will be used by metrics
 process_results: !function utils.cvbench_process_results
 # Note that the metric name can be either a registed metric function (such as the case for GQA) or a key name returned by process_results
 metric_list:
   - metric: cvbench_score
     aggregation: !function utils.cvbench_aggregate_results
+    higher_is_better: true
+  - metric: cvbench_answered
+    aggregation: !function utils.cvbench_aggregate_answered
     higher_is_better: true
 lmms_eval_specific_kwargs:
   default:

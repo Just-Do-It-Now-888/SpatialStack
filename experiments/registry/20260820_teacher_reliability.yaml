@@ -1,0 +1,497 @@
+experiment_id: 20260820_teacher_reliability
+title: "MV-OPSD teacher 可靠性：Qwen3.5-4B 在 3~32 视角下对训练问题的正确率"
+status: completed  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-20T23:40:00+08:00"
+finished_at: "2026-08-21T11:10:00+08:00"
+owner: "cursor-window-mvopsd"
+
+goal: >
+  自蒸馏把 teacher 的 N 视角后验拷给 student，但训练回路从未检查过这个后验是否正确：
+  vopd_loss 度量的是「student 与 teacher 是否一致」，不是「teacher 是否答对」
+  （LESSON-012）。本实验补上这次测量——用 rollout8 训练时 teacher 的真实输入
+  （teacher_prompt + 全部 N 张视角）让冻结的基座 Qwen3.5-4B 直接作答，统计其正确率，
+  并按 teacher 视角数 N 分组。
+
+  这是解释 LESSON-020（CV-Bench 最优 checkpoint 在 VSI-Bench 上崩 19 分）的一条
+  候选路径：如果 teacher 本身在训练分布上就答不对、且回答形态是长散文，
+  那么「student 学会了 teacher」与「student 在下游变差」并不矛盾。
+
+hypothesis: >
+  待检验，不预设方向。两个可分离的问题：
+  (a) 准确率——teacher 在训练问题上的正确率是多少，是否随视角数上升；
+  (b) 回答形态——teacher 是否直接作答。冒烟已观察到中位输出 215 token 的长散文
+  （见 findings.response_form），这一项本身就可能是 student 形态漂移的来源。
+
+relations:
+  explains: 20260818_qwen35base_mvopsd_v1_rollout8
+  note: >
+    视角数取值由 rollout8 实际训练数据决定（data/mvopsd/parquet/main_train.parquet
+    的 extra_info.n_views_teacher），不是自选的扫描点。
+
+design:
+  arm_as_trained:
+    what: "按训练实际 N 出表"
+    data: "data/mvopsd/parquet/main_train.parquet，全量 124,306 条"
+    teacher_views: "逐行 n_views_teacher，即该样本全部视角"
+    n_distribution:
+      "3": 33970    # spar_3view 全部
+      "4": 351
+      "5": 1531
+      "6": 3805
+      "7": 1429
+      "8": 62695    # llava_hound 30,620 + vlm3r 30,340 + vsi_appr_order 1,735
+      "32": 20525   # spar_32view 全部
+    view_instances: 1302162
+    confound: >
+      **N 与数据源几乎一一绑定**：N=3 只可能是 spar_3view，N=32 只可能是 spar_32view，
+      N=4~8 只可能是 llava_hound / vlm3r / vsi_appr_order。因此本 arm 的
+      「准确率 vs N」曲线读到的是数据源差异，**不得**表述为视角数的效应。
+      要分离必须看下面两条受控扫描。
+  arm_sweep:
+    what: "受控视角扫描：同一道题、同一相册，只改 teacher 看到的张数"
+    builder: scripts/opsd/build_teacher_view_sweep.py
+    view_selection: >
+      每个预算下取**全相册均匀间隔**的视角（np.linspace），不是嵌套随机抽取。
+      理由：4/32 的预算应当拿到「最好的 4 视角视图」，这也是本项目其他帧预算评测的
+      做法（vsibench_eval_core.sample_frames）。嵌套随机会拿一个好的 32 视角相册去比
+      一个差的 4 视角相册，把采样质量差异记成视角数效应。
+    pool_constraint: >
+      只用 required_views 为空（问题不引用任何 Frame-N）的样本，否则截断相册会留下
+      悬空帧引用，静默改变题意。
+    arms:
+      vlm3r:
+        source: vlm3r_scannet
+        album_views: 8
+        budgets: [1, 2, 3, 4, 5, 6, 7, 8]
+        questions: 2500
+        rows: 20000
+        rationale: "选择题，规则可判分，无解析器风险，给一条干净的曲线"
+      spar32:
+        source: spar_32view
+        album_views: 32
+        budgets: [1, 2, 3, 4, 6, 8, 12, 16, 24, 32]
+        question_types: [obj_count, room_size, spatial_imagination_oc_video_hard, spatial_imagination_oo_video_hard]
+        per_type: 500
+        questions: 2000
+        rows: 20000
+        rationale: "唯一能到 32 视角的源；四个题型两数值两方位，按题型均衡抽样"
+
+protocol:
+  fidelity: >
+    prompt 完全复刻 ray_trainer._build_teacher_prompt_inputs，而不是任何 benchmark harness：
+  details:
+    - "messages 直接取 parquet 的 teacher_prompt 列，因此**没有 system 轮**。
+       VSI-Bench 会加 'You are a helpful assistant.'，且该轮值约 1 分（ISSUE-203），
+       但 teacher 从未见过它，加上去就变成在测一个训练没用过的模型。"
+    - "enable_thinking=False，来自 data.apply_chat_template_kwargs。"
+    - "图像按缓存原尺寸交给 processor，**不设** min_pixels/max_pixels。
+       缓存已是 patch 对齐的 512x384（192 visual token/张），
+       preprocessor_config 的 [65536, 16777216] 像素区间不会触发缩放，
+       训练不做 resize，离线也不能做。"
+    - "max_tokens 1024 = data.max_response_length；greedy（temperature 0）。"
+    - "max_model_len 12288 = self_distillation.max_reprompt_len。"
+  code:
+    core: scripts/opsd/teacher_eval_core.py
+    entry: scripts/opsd/tools/run_teacher_reliability.py
+    driver: scripts/opsd/run_teacher_reliability.sh
+    sweep_builder: scripts/opsd/build_teacher_view_sweep.py
+
+scoring:
+  decision: "用户 2026-08-20 决定：SPAR 解析器 + gpt-oss-120b judge 判 llava_hound，覆盖 100%"
+  coverage_problem: >
+    现有训练打分函数 _mvopsd_score（scripts/opsd/mvopsd_reward.py:110）只认单字母选项与
+    纯数字，全量 124,306 条里只有 37,471 条（30.1%）可判分：
+    vlm3r_scannet 30,567（100%）、vsi_appr_order 1,735（100%）、
+    spar_3view 3,881（11.4%）、spar_32view 1,288（6.3%）、llava_hound 0。
+    直接跑会得到「N=3 与 N=32 准确率都接近 0」的假象。
+  code:
+    spar_parser: scripts/opsd/spar_scoring.py
+    router: scripts/opsd/teacher_scoring.py
+    rule_tier: scripts/opsd/tools/score_teacher_dump.py
+    judge_tier: scripts/opsd/tools/judge_teacher_dump.py
+    judge_driver: scripts/opsd/run_teacher_judging.sh
+    tests: [scripts/opsd/tests/test_spar_scoring.py, scripts/opsd/tests/test_teacher_scoring.py]
+  spar_families:
+    numeric: "depth / distance / obj_count / room_size，用 MRA:.5:.95:.05，与 VSI-Bench 数值题同尺"
+    direction: "left|right、above|below、（仅 oo 题）closer|farther 三条独立轴"
+    compare_pair: "distance_infer_center_oo_mv：green / blue 哪个点"
+    compare_set: "distance_infer_center_oo_video：哪个 ObjectN 最近/最远"
+    bev: "spatial_imagination_map_mv：坐标表，单独一行上报，**不并入**主准确率（0.5m 容差是我们定的，不是 SPAR 的口径）"
+  deliberate_exclusions:
+    - "方位题丢弃 front/behind 从句：它说的是观察者在哪，不是答案，且同一条金标常两个词都出现。"
+    - "*_imagination_*_mv 金标同时描述移动前后，题面只问移动后；朴素扫描歧义时从最后一个
+       move 标记重读，仍歧义则记为金标读不出并**移出分母**，不按硬币正反判。"
+    - "方位题只答一半（金标 left below，模型只说 below）计为 answered=1 / score=0，
+       即「答错」而非「读不出」；只有一条轴都读不出才送 judge。"
+  judge_protocol:
+    mode: >
+      有结构化答案的一律让 judge 做**抽取**（数字 / 选项字母 / 三轴方位 / 候选名），
+      评分仍由本项目指标完成。Yes/No verdict 会把 MRA 压成二值，并用 judge 自己的
+      标准替代基准的标准——Vision-OPD 的级联就是这么推翻了约 10% 规则已判对的行（LESSON-019）。
+      抽取 prompt **不给 judge 看金标**，否则它会开始报告正确答案而不是模型说了什么。
+    semantic_exception: "llava_hound 是开放描述，没有可抽取的目标，只能语义 verdict"
+    reverse_audit: "规则已读出的行按 2% 抽样重新交给 judge 抽取，报告分歧率与分歧题型"
+    calibration_probe: >
+      语义层无规则层可对照，改为自检：把金标当作回答喂进去（应答 Yes）、
+      把另一条样本的金标喂进去（应答 No），两个错误率与分数并列上报。
+    never_lowers: "只重判规则层弃权的行，judge 能抬分不能压分；rule-only 数值并列保留"
+  separation: "answered 与 score 分开上报；解析失败绝不折叠成 0 分（LESSON-018）"
+  gold_coverage_measured: "SPAR 金标 54,488 / 54,495 = 99.99% 可解析（剩 7 条 obj_spatial_relation_oo_mv 自相矛盾）"
+  self_consistency_test: >
+    把每条金标当作模型回答喂回去必须得 1.0 分，49,550 条全通过。
+    这条测试抓到了三个真 bug：金标数值取了首个数字（把 "Object50 ... 0.8 meters" 读成 50）、
+    方位题读回答时没做移动前后消歧、以及下面的 vsibench_scoring 句末数字 bug。
+
+findings:
+  response_form:
+    measured_at: "2026-08-20T23:20:00+08:00"
+    source: "600 条随机冒烟，logs/eval/teacher_reliability/_smoke/"
+    observation: >
+      **teacher 不直接作答。** 中位输出 215 token、最大 1024、1 条截断。
+      连 vlm3r_scannet 这种 prompt 末尾明写
+      "Answer with the option's letter from the given choices directly." 的选择题，
+      teacher 也会先写一大段分析。对照：同一基座在 VSI-Bench 上（带 system 轮、
+      lmms_eval 题面）中位输出只有 4 token。
+    why_it_matters: >
+      待核对，但方向明确：student 被蒸馏的正是这个长散文后验。
+      LESSON-020 记录的 student 退化形态（中位输出从 4 token 跳到 168~205 token、
+      滑入重复枚举）与 teacher 的形态同向。若最终数据坐实，
+      「训练把模型改成写长推理」的源头就是 teacher 本身，而不是优化超参。
+    caveat: "600 条冒烟，仅用于确认链路与形态，不作为准确率结论。"
+
+evaluation:
+  status: done
+  throughput: "11.3 行/秒实测（8 卡 TP=8）"
+  actual_wall: "as_trained 3.06h（124,306 行）；sweep_vlm3r 8.1min；sweep_spar32 16.7min；judge 层 20min"
+  artifacts:
+    root: logs/eval/teacher_reliability/
+    as_trained: logs/eval/teacher_reliability/as_trained/generations.jsonl
+    sweep_vlm3r: logs/eval/teacher_reliability/sweep_vlm3r/generations.jsonl
+    sweep_spar32: logs/eval/teacher_reliability/sweep_spar32/generations.jsonl
+    status: logs/eval/teacher_reliability/status.txt
+    scored: "各目录下 scored_judged.jsonl + summary.json（summary_prefix.json 是 ISSUE-T06 修复前的旧版，留作对比）"
+    report: experiments/reports/汇报_20260821_评估Teacher监督可靠性与视角收益.md
+
+  results:
+    headline: >
+      teacher 在训练池上整体正确率 41.4%（124,306 条，作答率 97.6%），
+      但题型间跨度达 40 倍：llava_hound 描述题 57.7%，
+      spar_32view 物-物空间想象题只有 1.3%。
+      受控扫描显示视角收益明显边际递减：vlm3r 在 5 视角后趋于饱和，
+      spar32 在 16 视角后趋缓；8→32 视角的额外收益与新增计算成本不成比例。
+
+    # N 与数据源几乎一一绑定，这张表不能读成视角效应。
+    by_n_views_confounded:
+      3:  {rows: 33970, acc: 33.35, answered_pct: 94.9, source: spar_3view}
+      4:  {rows: 351,   acc: 47.81, answered_pct: 98.0, source: llava_hound}
+      5:  {rows: 1531,  acc: 59.80, answered_pct: 100.0, source: llava_hound}
+      6:  {rows: 3805,  acc: 58.89, answered_pct: 100.0, source: llava_hound}
+      7:  {rows: 1429,  acc: 58.84, answered_pct: 99.9, source: llava_hound}
+      8:  {rows: 62695, acc: 50.88, answered_pct: 99.1, source: "vlm3r + llava_hound"}
+      32: {rows: 20525, acc: 19.91, answered_pct: 96.8, source: spar_32view}
+
+    by_source:
+      llava_hound_64k: {rows: 37509, acc: 57.72}
+      vsi_appr_order:  {rows: 1735,  acc: 55.27}
+      vlm3r_scannet:   {rows: 30567, acc: 44.02}
+      spar_3view:      {rows: 33970, acc: 33.35}
+      spar_32view:     {rows: 20525, acc: 19.91}
+
+    by_family:
+      freeform:     {rows: 37509, acc: 57.72}
+      yesno:        {rows: 360,   acc: 62.22}
+      compare_pair: {rows: 4585,  acc: 56.21}
+      mcq:          {rows: 26467, acc: 45.97}
+      numeric:      {rows: 30991, acc: 39.06}
+      compare_set:  {rows: 1260,  acc: 33.81}
+      direction:    {rows: 20698, acc: 10.54}
+      bev:          {rows: 2436,  acc: 6.10}
+
+    worst_and_best_question_types:
+      best:
+        - {type: "llava_hound 描述题", rows: 37509, acc: 57.72}
+        - {type: "spar_3view/distance_infer_center_oo_mv", rows: 4985, acc: 57.01}
+        - {type: "vsi_appr_order/appearance_order", rows: 1735, acc: 55.27}
+      worst:
+        - {type: "spar_32view/spatial_imagination_oo_video", rows: 3162, acc: 1.30}
+        - {type: "spar_32view/spatial_imagination_oo_video_hard", rows: 2568, acc: 1.52}
+        - {type: "spar_3view/spatial_imagination_map_mv (BEV)", rows: 2436, acc: 6.10}
+
+    # 见 ISSUE-T05：全匹配分数被「答得不全」主导，方向感本身并不差。
+    direction_decomposed:
+      note: "complete_pct = 答全金标所有轴的比例；axis_acc = 在它主动说出口的轴上的微平均准确率"
+      spar_32view/spatial_imagination_oo_video:      {complete_pct: 2.9,  axis_acc: 68.2, exact: 1.6}
+      spar_32view/spatial_imagination_oo_video_hard: {complete_pct: 2.8,  axis_acc: 69.1, exact: 2.1}
+      spar_32view/spatial_imagination_oc_video:      {complete_pct: 36.2, axis_acc: 55.3, exact: 17.7}
+      spar_3view/obj_spatial_relation_oc_mv:         {complete_pct: 32.6, axis_acc: 73.0, exact: 24.9}
+      spar_3view/obj_spatial_relation_oo_mv:         {complete_pct: 9.5,  axis_acc: 73.6, exact: 17.4}
+      spar_3view/spatial_imagination_oc_mv:          {complete_pct: 30.2, axis_acc: 51.1, exact: 14.8}
+
+    # 固定题目、只变视角数，视角在整段相册上均匀取样。这才是视角效应。
+    sweep_vlm3r:
+      design: "2,500 道 vlm3r_scannet 题 × 8 个预算 = 20,000 行"
+      curve: {1: 33.03, 2: 35.50, 3: 36.89, 4: 39.53, 5: 42.08, 6: 41.20, 7: 42.27, 8: 41.35}
+      conclusion: "1→5 涨 9.1 个点；5 张之后完全饱和（5/6/7/8 在 41.2-42.3 之间无趋势抖动）"
+
+    sweep_spar32:
+      design: "2,000 道帧无关（required_views==0）spar_32view 题 × 10 个预算 = 20,000 行"
+      curve: {1: 11.93, 2: 12.84, 3: 13.04, 4: 14.94, 6: 16.50, 8: 18.43, 12: 19.80, 16: 20.70, 24: 20.48, 32: 21.95}
+      conclusion: >
+        1→32 一共只涨 10.0 个点，16 张之后基本走平（16/24/32 在 20.5-22.0）。
+        即使给到 32 张图绝对正确率仍不到 22%，说明瓶颈不在信息量而在推理能力。
+
+    scoring_confidence:
+      rule_tier_share: "规则层独立判掉 62.9%（78,177/124,306）"
+      judge_read: "46,129 条队列读出 43,977 条；剩余 2,152 条是真正没给答案的回答，计 0 分"
+      reverse_audit:
+        as_trained: "3.11%（12/386）"
+        sweep_vlm3r: "0.51%（2/391）"
+        sweep_spar32: "3.28%（10/305），其中材质性分歧（gap>0.25）仅 1.97%"
+        adjudicated: >
+          人工逐条复核了 as_trained 全部 12 条分歧，**规则层对、judge 错**：
+          MCQ 上回答末尾明确写着 C、规则层读出 C，judge 却报 B（它在自己答题而非抽取）；
+          方向题上 judge 会把回答根本没说的轴补全。
+          所以该数字是分歧率的**上界**，不是规则层错误率。
+      semantic_calibration: "金标当回答喂回去 100 条零误判；无关 caption 100 条仅 1 条误接受"
+      judge_not_inflating: >
+        方向题上 judge 补判行准确率 8.11%，低于规则层判的 12.18%
+        （spar32 扫描 3.68% vs 9.62%）——judge 接手的是更含糊的回答，整体无系统性抬分。
+
+    recommendations:
+      - >
+        采用“8 视角基础预算 + 按需补充”：vlm3r 在 5 视角后趋于饱和，
+        spar32 在 16 视角后增益趋缓。
+        但 spar32 受控扫描仅覆盖不引用特定帧的题目，因此不能把所有 32 视角样本无条件截断为 8；
+        对题面明确依赖特定帧的样本应至少保留所需视角。
+      - >
+        spatial_imagination_oo_*（5,730 条）当前不适合直接蒸馏：1.3-1.5% 不是能力问题而是格式问题
+        （teacher 只答一条轴，单轴准确率 68%）。要么改 prompt 强制三轴齐出，要么从蒸馏目标里摘掉。
+      - "按题型给蒸馏样本加权：可靠性跨度 57.7%→1.3%，统一对待等于让错误信号与正确信号同权进入训练"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-08-21T12:40:00+08:00"
+  current_task: "全部完成。报告已逐数据集补全评分口径、LLM 职责边界与可信度证据；8 卡已释放"
+  owner: "cursor-window-mvopsd"
+  active_job_id: ""
+  resources: "已释放（judge 服务已停，8 卡显存归零）"
+  blocker: ""
+  next_action: >
+    本实验的结论已可直接用于决策，无遗留作业。下游三件事按优先级：
+      1. 采用“8 视角基础预算 + 显式帧引用按需补充”，重跑一次 rollout 对比监督质量与成本；
+      2. 对 spatial_imagination_oo_*（5,730 条）改 teacher prompt 强制三轴齐出，
+         用同一套 harness 复测这批题能否从 1.3% 提到可蒸馏水平；
+      3. 按题型可靠性给蒸馏样本加权，最可靠的三档共 44,229 条（55-58%）优先。
+    复现命令见报告第八节。
+
+issues:
+  - id: ISSUE-T01
+    at: "2026-08-20T23:20:00+08:00"
+    symptom: "断点续跑按 sample_id 去重会静默丢样本"
+    evidence: "main_train.parquet 124,306 行只有 123,645 个不同的 sample_id，661 条重名"
+    root_cause: "同一道 SPAR 题在两个视角子集下各写了一行，sample_id 不含子集"
+    solution: "teacher_eval_core.done_ids 改用 row_index（构造时按 parquet 行号赋值，天然唯一）"
+    status: resolved
+    prevention: "任何按 id 去重的续跑逻辑先验证该 id 在源数据里唯一"
+
+  - id: ISSUE-T02
+    at: "2026-08-21T00:30:00+08:00"
+    symptom: "句末数字读不出：'Therefore, the count of pipes is 0.' 解析为 None，记成「无法判读」"
+    evidence: >
+      冒烟 600 条里 4 条 obj_count 落到 judge 队列，逐条 debug 发现
+      extract_vsibench_number 返回 None，而回答末行明明有数字。
+    root_cause: >
+      scripts/opsd/vsibench_scoring.py 的 _NUMBER_RE 尾部前瞻是 `(?![\d.])`，
+      本意是挡住 "1.2.3"，但同时把任何**句末**数字（后面跟句号）也挡掉了。
+      主路径 _ANSWER_NUMBER_RE 无此前瞻，所以只在兜底路径暴露，此前一直没被发现。
+    solution: "前瞻改为 `(?!\\d)(?!\\.\\d)`：仍拒绝版本号形式，但接受句末数字"
+    status: resolved
+    impact: >
+      影响面是 VSI-Bench 数值题里「没有 answer/distance 等关键词、且数字在句末」的回答。
+      只会把 answered 从 0 改成 1，不会把已判读的行改判，因此历史分数只可能被低估。
+      已回归 test_lmms_vsibench_protocol / test_vsibench_in_training / test_lmms_cvbench_protocol，均通过。
+    prevention: "正则前瞻若同时承担「拒绝格式 A」与「界定边界」，分开写并各配一条测试"
+
+  - id: ISSUE-T04
+    at: "2026-08-21T01:20:00+08:00"
+    symptom: "spar32 扫描集 2,000 道题只聚出 1,988 个 sweep_group"
+    evidence: >
+      plan.jsonl 里 674 个 sample_id 各指两道**不同**的题（逐条比对 body，
+      0/674 文本相同）：id 是 scene+index，跨题型会撞。
+      例：spar32/abf29d2474_18 一条是 room_size，另一条是 spatial_imagination。
+    root_cause: "sweep_group 直接用了 sample_id，与 ISSUE-T01 同源"
+    solution: "sweep_group 改为 sample_id#plan_position，并在 builder 里断言组数==题数"
+    status: resolved
+    prevention: >
+      同一个不唯一的 id 已经咬了两次（续跑去重、扫描分组）。
+      凡是拿 id 做「同一个东西」的依据，先断言唯一性，且把断言写进构造脚本本身。
+
+  - id: ISSUE-T03
+    at: "2026-08-21T00:50:00+08:00"
+    symptom: "SPAR 数值题金标解析出 50、169 这种物体编号"
+    evidence: >
+      「金标当回答喂回去必须满分」的自洽测试报出 3,007 条不匹配，
+      集中在 distance/depth 三个题型，例如
+      "At a depth of about 6.7 meters, Object169's center is referenced here." 金标读成 169。
+    root_cause: "金标侧取的是字符串里第一个数字，而这些模板把物体 id 写在测量值前后"
+    solution: "金标与回答两侧都改为优先取带单位的数字（`X meters` / `X square meters`），obj_count 除外"
+    status: resolved
+    prevention: "金标解析器必须过自洽测试；这条测试原本因为两侧犯同一个错而假通过"
+
+  - id: ISSUE-T05
+    at: "2026-08-21T02:20:00+08:00"
+    symptom: "方向题分数低到没法解释：spatial_imagination_oo_video 全匹配准确率 0.9%，低于三轴瞎猜的 12.5%"
+    evidence: >
+      中期 55,665 条上，该题型 answered 54.7%、acc|ans 1.64%。
+      三条轴（左右/上下/远近）独立二选一，瞎猜也该有 1/8。
+    root_cause: >
+      不是 bug，是指标把两件事混在一起了。方向题按「金标提到的每条轴都要对」全匹配计分，
+      于是「说了 above，但金标是 left+above+farther」和「说了 right，金标是 left」同样得 0。
+      teacher 的实际行为是只挑一条轴回答，所以分数被不完整性主导，掩盖了它的方向感本身。
+    solution: >
+      teacher_scoring.aggregate 增加两个分解列并在 score_teacher_dump 里单出一张表：
+      direction_complete_pct（答全了金标所有轴的比例）与
+      direction_axis_acc（在它主动说出口的轴上的微平均准确率）。
+      全匹配分数保留为主指标不变，分解列只用于解释。
+    status: resolved
+    impact: >
+      不改任何分数，只是让「答得不全」与「答得不对」在报告里可分。
+      按此看：oo_video 完整率 2.8% / 轴准确率 67.3%，oo_video_hard 2.9% / 69.0%，
+      oc_video 35.7% / 53.9%，obj_spatial_relation_oc_mv 32.9% / 73.9%。
+      （全量最终数字见 evaluation.results.direction_decomposed。）
+    prevention: "全匹配（all-of-K）指标一旦逼近或低于随机水平，先分解成「覆盖率 × 单项准确率」再下结论"
+
+  - id: ISSUE-T06
+    at: "2026-08-21T10:40:00+08:00"
+    symptom: "数值题回答被读成负数：obj_count 解析出 -4 / -21 / -24，全部记 0 分"
+    evidence: >
+      spar32 扫描的反向抽查分歧率 8.6%（as_trained 只有 1.8%），26 条全在 numeric。
+      逐条调出原始回答：金标「2 clothes」，回答结尾是
+      "In Frame-4, there is another pile ... there are two distinct piles"，
+      规则层 parsed_repr = '-4'。
+      按 parsed_repr 以 '-' 开头统计：spar32 扫描 967/9,580 = 10.1% 的数值题中招，
+      as_trained 388/30,991 = 1.25%，且这些行**无一例外得 0 分**。
+    root_cause: >
+      vsibench_scoring._NUMBER_RE 的后顾只有 `(?<![\d.])`，不挡字母。
+      多视角 prompt 把每张图标成 Frame-0..Frame-N，teacher 讲解时频繁引用这些标签，
+      而兜底路径取「最后一行的最后一个数字」——于是 "Frame-4" 里的连字符被当成负号。
+      spar32 中招率远高于 vlm3r，是因为 32 图的回答几乎必然逐帧点名。
+    solution: >
+      后顾改为 `(?<![\w.])(?<!\w-)`：前者挡住 scene0555_00 这类标识符，
+      后者专门挡住「连字符粘在词后面」的帧标签。真负数（"-3.5 metres"）仍可解析。
+      修好后这些行落回词形数字兜底（"two" → 2），大多能正确判读。
+    status: resolved
+    impact: >
+      只会把错判的 0 分改成正确判读，不会把已对的行改错，所以历史分数是**低估**。
+      spar32 扫描曲线整体上移，as_trained 影响约 1.25% 的数值题。
+      已回归 test_lmms_vsibench_protocol / test_vsibench_in_training /
+      test_lmms_cvbench_protocol（11 条）与 SPAR 37 条，全通过。
+    prevention: >
+      判分正则要拿**真实回答文本**里的高频干扰串做测试，不能只测理想答案。
+      "Frame-N" 是 prompt 自己引入的，属于必测干扰项。
+
+  - id: ISSUE-T07
+    at: "2026-08-21T10:50:00+08:00"
+    symptom: "修好 T06 后自洽测试立刻报 1 条：金标「2 rj45 outlet」被读成 45"
+    evidence: "test_gold_scores_itself 报 obj_count/numeric 1 条不匹配；金标解析 45，回答侧解析 2"
+    root_cause: >
+      spar_scoring.py 自己又定义了一份 `_NUMBER_RE = r"-?\d+(?:\.\d+)?"` 供金标侧使用，
+      完全没有后顾。T06 只修了 vsibench_scoring 那一份，于是两侧读法分叉，
+      金标侧仍会从 "rj45" 里读出 45（它同样会从 "Frame-4" 读出 -4）。
+    solution: "删掉本地副本，金标侧改为 `from vsibench_scoring import _NUMBER_RE`，全仓一份定义"
+    status: resolved
+    impact: >
+      这条恰好被自洽测试当场抓住——正是 LESSON-021 预警过的「两侧各写一套正则迟早分叉」。
+      在修一个解析 bug 的过程中立刻复现了同一类错误，说明该测试值得常驻。
+    prevention: "同一个语义的解析器全仓只允许一份定义；修解析 bug 后必须重跑自洽测试"
+
+activity_log:
+  - at: "2026-08-20T23:40:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "登记实验，核定 teacher 视角数取值，冒烟通过后启动三段生成"
+    result: >
+      从 rollout8 的 main_train.parquet 逐行读出 n_views_teacher，确认 teacher 实际
+      只见过 7 个视角数取值（3/4/5/6/7/8/32），且与数据源几乎一一绑定。
+      600 条冒烟跑通，8.4 行/秒，prompt 峰值 6,516 token（上限 12,288），无 OOM。
+      同时造好两条受控扫描集（vlm3r 8 预算 / spar32 10 预算，各 20,000 行）。
+
+  - at: "2026-08-21T01:00:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "写完判分链路：SPAR 解析器、规则层路由、judge 层，共 35 条测试"
+    result: >
+      SPAR 金标解析覆盖 99.99%（54,488/54,495）。规则层在 600 条冒烟上把弃权率从
+      47.8% 压到 37.2%，其中 174 条是 llava_hound（设计上就归 judge），
+      非 llava_hound 的弃权率是 49/426 = 11.5%。
+      过程中修掉三个 bug（ISSUE-T01/T02/T03），其中 T02 是 vsibench_scoring 里
+      句末数字读不出的老 bug，影响 VSI-Bench 数值题的兜底路径。
+      生成侧稳定在 10.5 行/秒，as_trained 预计 3.7h。
+
+  - at: "2026-08-21T02:30:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "as_trained 跑到 55,665/124,306 时做了一次中期判分，据此加了方向题的分解统计"
+    result: >
+      中期规则层弃权率 37.2%，与冒烟一致。发现两件必须写进最终报告的事：
+
+      一、N=4/5/6/7 四档在规则层上「几乎全 0」是假象，不是 teacher 差。
+      这四档 96% 以上是 llava_hound（其视频帧数在 4-8 浮动），而 llava_hound
+      按设计整源交给语义 judge，规则层一条都不判。这四档要等 judge 跑完才有数。
+
+      二、spatial_imagination_oo_* 的近零分主要是「答得不全」，不是「答得不对」。
+      加了按轴分解后（见 ISSUE-T05）：oo_video 只有 2.8% 的回答把金标要求的三条轴
+      全说了，但**它说出口的那些轴有 67% 是对的**。oc_*（两条轴）完整率 29-36%，
+      轴准确率 51-54%。也就是说严格全匹配下的 1.7% 主要由不完整贡献。
+
+  - at: "2026-08-21T11:10:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "生成与判分全部完成；修掉 ISSUE-T06/T07 后重跑整条判分链路，写出报告"
+    result: >
+      生成 03:12 结束（as_trained 3.06h / 11.3 行每秒，两条扫描 25min），
+      链式脚本 03:34 自动跑完判分。核对反向抽查时发现 spar32 分歧率 8.6%
+      异常高于 as_trained 的 1.8%，逐条调原始回答定位到 ISSUE-T06：
+      "Frame-4" 被读成负数 -4，spar32 数值题 10.1% 中招。
+      修复并重跑后：spar32 数值题 24.7% → 27.4%，分歧率 8.6% → 3.3%。
+      修 T06 时自洽测试当场抓出 ISSUE-T07（金标侧另有一份宽松正则）。
+
+      最终结论：整体 41.4%（作答率 97.6%），题型跨度 57.7% → 1.3%。
+      两条受控扫描一致显示**视角收益在 5 张后基本消失**
+      （vlm3r 1→5 涨 9.1 点后饱和；spar32 1→32 只涨 10.0 点且 16 张后走平）。
+      人工复核 as_trained 全部 12 条抽查分歧，规则层对、judge 错，
+      故 3.11% 是分歧率上界而非规则层错误率。
+      报告：experiments/reports/汇报_20260821_评估Teacher监督可靠性与视角收益.md
+      8 卡已释放。
+
+  - at: "2026-08-21T12:35:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "优化最终报告表述与结构，并收紧视角预算结论的适用范围"
+    result: >
+      报告改为“摘要与决策建议 → 实验设置与指标口径 → 训练池结果 →
+      受控视角扫描 → 评分可信度 → 行动建议”的结构；统一补全百分号和术语定义，
+      区分全样本正确率、作答率以及方向题条件统计。
+      同时修正原文过强表述：spar32 扫描只覆盖 required_views==0 的帧无关题，
+      因此不能据此把所有 32 视角样本无条件截断为 8。最终建议改为
+      “8 视角基础预算 + 对显式帧引用按需补充”。
+      另订正“所有收益集中在前 5 视角”的过度概括：该结论只适用于 vlm3r；
+      spar32 仍持续受益至约 16 视角，之后才明显趋缓。
+
+  - at: "2026-08-21T12:40:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "按数据集扩写报告的评分方法与可信度章节"
+    result: >
+      分别说明 llava_hound（LLM 语义判断）、vlm3r（MCQ 精确匹配 / 数值 MRA）、
+      vsi_appr_order（MCQ 精确匹配）、spar_3view 与 spar_32view
+      （numeric / direction / compare / BEV / yes-no）的评分与 LLM fallback。
+      明确除 llava_hound 外，LLM 只抽取回答、最终仍由固定规则评分；
+      并按数据集列出校准与反向抽查证据，以及未做独立分层抽查的限制。
+      同时补充总体 41.4% 包含内部 BEV 指标；去除 2,436 条 BEV 后为 42.1%。
+
+  - at: "2026-08-21T23:55:00+08:00"
+    actor: cursor-window-mvopsd
+    action: "按实验目的、实验设置、实验结果与结果分析的主线重构正式汇报"
+    result: >
+      新增“实验目的与研究问题”和独立“实验结果分析”章节；将完整训练池结果与
+      受控视角扫描拆开呈现，并集中解释任务类型混淆、视角边际收益、方向题回答完整性、
+      Teacher 长回答形态和统一 token 权重的风险。保留全部评分口径、可信度检查、
+      工具修正和复现命令。报告重命名为
+      experiments/reports/汇报_20260821_评估Teacher监督可靠性与视角收益.md。
+      同时订正 registry 顶层状态：实验实际已于 11:10 完成，不再标为 running。

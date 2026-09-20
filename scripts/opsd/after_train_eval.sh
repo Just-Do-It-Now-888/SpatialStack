@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Wait for a running MV-OPSD training job, then merge its final checkpoint and
 # measure the VSI-Bench frame-budget curve for both the trained model and the
-# SFT baseline it started from.
+# base model it started from.
 #
 #   scripts/opsd/after_train_eval.sh <train_pid> [experiment_name] [final_step]
 #
-# The baseline curve is not optional. MV-OPSD claims an advantage at low frame
-# budgets, and the only baseline number we have is 64.24 at 32 frames, so
-# without the left half of the baseline curve the trained model's numbers cannot
-# be read as better or worse than the starting point.
+# The base-model curve is not optional. MV-OPSD claims an advantage at low frame
+# budgets, and the released Qwen3.5-4B has never been measured on VSI-Bench here,
+# so without its curve the trained model's numbers cannot be read as better or
+# worse than the starting point.
 #
 # Sentinels (grep-able, and used to wake the agent):
 #   MVOPSD_CHAIN_TRAIN_EXITED, MVOPSD_CHAIN_ABORT, MVOPSD_CHAIN_MERGED,
@@ -20,9 +20,9 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 TRAIN_PID="${1:?usage: after_train_eval.sh <train_pid> [experiment_name] [final_step]}"
-EXPERIMENT_NAME="${2:-20260816_qwen35_mvopsd_v0_main}"
+EXPERIMENT_NAME="${2:-20260816_qwen35base_mvopsd_v0_main}"
 FINAL_STEP="${3:-300}"
-BASE_MODEL="${BASE_MODEL:-${PROJECT_ROOT}/output/spatialstack_qwen35_novggt_aligned}"
+BASE_MODEL="${BASE_MODEL:-${PROJECT_ROOT}/models/Qwen3.5-4B}"
 FRAMES="${FRAMES:-1 2 4 8 16 32}"
 
 STEP_DIR="${PROJECT_ROOT}/checkpoints/${EXPERIMENT_NAME}/global_step_${FINAL_STEP}"
@@ -52,11 +52,13 @@ fi
 echo "MVOPSD_CHAIN_MERGED {\"model\":\"${HF_DIR}\"}"
 
 status=0
-echo "=== frame-budget curve: trained model ($(date +%T))"
-FRAMES="$FRAMES" bash scripts/opsd/eval_frame_budget.sh "$HF_DIR" "${EXPERIMENT_NAME}" || status=1
-
-echo "=== frame-budget curve: SFT baseline ($(date +%T))"
-FRAMES="$FRAMES" bash scripts/opsd/eval_frame_budget.sh "$BASE_MODEL" "sft_baseline_frame_curve" || status=1
+# One frame budget at a time, trained model then base model, so an interrupted
+# run still leaves complete comparable pairs instead of one full curve and none.
+for frames in $FRAMES; do
+  FRAMES="$frames" bash scripts/opsd/eval_frame_budget.sh "$HF_DIR" "${EXPERIMENT_NAME}" || status=1
+  FRAMES="$frames" bash scripts/opsd/eval_frame_budget.sh "$BASE_MODEL" "qwen35_base_frame_curve" || status=1
+  echo "MVOPSD_CHAIN_EVAL_POINT {\"frames\":${frames},\"at\":\"$(date +%F\ %T)\"}"
+done
 
 echo "MVOPSD_CHAIN_EVAL_DONE {\"status\":${status},\"at\":\"$(date +%F\ %T)\"}"
 exit "$status"

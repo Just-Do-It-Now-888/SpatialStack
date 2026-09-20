@@ -1,0 +1,141 @@
+experiment_id: 20260904_vsibench_vllm_base_spar3_step55
+title: "VSI-Bench vLLM：基座 vs SPAR3 K=1 step 55，greedy + sample 串行"
+status: completed
+completed_at: "2026-09-04T04:34:00+08:00"
+created_at: "2026-09-04T01:00:00+08:00"
+owner: cursor-window-mvopsd
+node: node-B
+
+goal: >
+  对照表第 95–98 行四格用同一 vLLM harness 补齐 greedy 与 sample。
+  基座 original greedy 已完成（52.47），不重跑。不开 judge。
+  sample 为单次 t=1.0 / top_p=0.8 / seed=20260904，不可与 greedy 并列上报。
+
+protocol:
+  launcher: scripts/opsd/run_vsibench_vllm_base_spar3_chain.sh
+  harness: scripts/opsd/tools/eval_vsibench_vllm.py
+  python: conda sr_opsd
+  frames: 32
+  max_model_len: 16384
+  tensor_parallel_size: 8
+  enable_thinking: false
+  judge: false
+  boxed_suffix: " The final answer MUST BE put in \\boxed{} on the last line of your response."
+  sample:
+    do_sample: true
+    temperature: 1.0
+    top_p: 0.8
+    seed: 20260904
+
+models:
+  base: models/Qwen3.5-4B
+  spar3: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+
+skipped:
+  base_plain_greedy:
+    reason: already done
+    overall: 52.47
+    answered_frac: 98.50
+    summary: logs/eval/20260903_qwen35base_vsibench_plain_vllm/summary.json
+
+arms:
+  spar3_plain_greedy:
+    output_root: logs/eval/20260904_spar3_k1_step55_vsibench_plain_vllm
+    protocol: spatialstack_plain
+    max_tokens: 1024
+    sample: false
+    status: done
+    overall: 47.82
+    answered_frac: 95.93
+    wall_minutes: 24.1
+    delta_vs_base_vllm_greedy: -4.65
+  spar3_plain_sample:
+    output_root: logs/eval/20260904_spar3_k1_step55_vsibench_plain_vllm_sample
+    protocol: spatialstack_plain
+    max_tokens: 1024
+    sample: true
+    status: done
+    overall: 46.87
+    answered_frac: 96.76
+    wall_minutes: 25.0
+    delta_vs_base_vllm_sample: -2.08
+  base_boxed_greedy:
+    output_root: logs/eval/20260904_qwen35base_vsibench_boxed_lastline_vllm
+    protocol: spatialstack
+    max_tokens: 4096
+    sample: false
+    status: done
+    overall: 48.42
+    answered_frac: 95.59
+    wall_minutes: 31.3
+    vs_hf_48_06: 0.36
+  base_boxed_sample:
+    output_root: logs/eval/20260904_qwen35base_vsibench_boxed_lastline_vllm_sample
+    protocol: spatialstack
+    max_tokens: 4096
+    sample: true
+    status: done
+    overall: 47.84
+    answered_frac: 98.56
+    wall_minutes: 30.2
+  spar3_boxed_greedy:
+    output_root: logs/eval/20260904_spar3_k1_step55_vsibench_boxed_lastline_vllm
+    protocol: spatialstack
+    max_tokens: 4096
+    sample: false
+    status: done
+    overall: 49.61
+    answered_frac: 98.21
+    wall_minutes: 28.8
+    delta_vs_base_vllm_greedy: 1.19
+  spar3_boxed_sample:
+    output_root: logs/eval/20260904_spar3_k1_step55_vsibench_boxed_lastline_vllm_sample
+    protocol: spatialstack
+    max_tokens: 4096
+    sample: true
+    status: done
+    overall: 47.31
+    answered_frac: 99.10
+    wall_minutes: 28.9
+    delta_vs_base_vllm_sample: -0.53
+  base_plain_sample:
+    output_root: logs/eval/20260904_qwen35base_vsibench_plain_vllm_sample
+    protocol: spatialstack_plain
+    max_tokens: 1024
+    sample: true
+    status: done
+    overall: 48.95
+    answered_frac: 98.62
+    wall_minutes: 21.2
+
+results:
+  reading: >
+    vLLM greedy：original 52.47 vs 47.82（−4.65）；boxed 48.42 vs 49.61（+1.19）。
+    符号与 HF 同向。sample 单次 seed=20260904，不可与 greedy 并列。
+  driver: logs/eval/20260904_vsibench_vllm_base_spar3_step55/driver.log
+  status: logs/eval/20260904_vsibench_vllm_base_spar3_step55/status.txt
+  wrapper_pid: 3411747
+
+comparability:
+  do_not_mix:
+    - "HF boxed last-line 48.06 / 49.84"
+    - "HF original 52.75 / 47.87"
+    - "vLLM greedy vs sample"
+    - "历史 vLLM 52.58"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-04T04:40:00+08:00"
+  current_task: "7 臂全部 rc=0；对照表已补 vLLM greedy/sample"
+  owner: cursor-window-mvopsd
+  resources: ""
+  next_action: ""
+
+issues: []
+activity_log:
+  - at: "2026-09-04T04:34:00+08:00"
+    what: "ALL DONE；8 卡已释放。7 臂均 rc=0。"
+  - at: "2026-09-04T01:04:03+08:00"
+    what: "node-B driver PID 3411747 启动；第一臂 spar3_plain_greedy 已进 vLLM 加载"
+  - at: "2026-09-04T01:00:00+08:00"
+    what: "登记并准备在 node-B 启动链式 vLLM 评测"

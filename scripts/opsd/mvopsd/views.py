@@ -16,6 +16,10 @@ IMAGE_TOKEN = "<image>"
 VIDEO_TOKEN = "<video>"
 
 FRAME_REF_RE = re.compile(r"Frame-(\d+)")
+# MindCube cites views in prose as "image 2" / "Image 2", 1-indexed. Separate
+# from FRAME_REF_RE because the numbering base differs: renumbering a MindCube
+# reference to 0 would point at a view that does not exist.
+IMAGE_REF_RE = re.compile(r"\b([Ii]mage) (\d+)\b")
 # SPAR's BEV-style questions define the world origin as the observer position of
 # the first image; dropping view 0 silently invalidates the ground truth.
 ANCHOR_PHRASES = ("first image", "first view", "main viewpoint")
@@ -61,6 +65,29 @@ def renumber_frame_refs(text: str, mapping: dict[int, int]) -> str:
         return f"Frame-{mapping[old]}"
 
     return FRAME_REF_RE.sub(replace, text)
+
+
+def referenced_images(text: str) -> set[int]:
+    """1-indexed ``image N`` references, returned as 0-based view indices."""
+    return {int(number) - 1 for _, number in IMAGE_REF_RE.findall(text)}
+
+
+def renumber_image_refs(text: str, mapping: dict[int, int]) -> str:
+    """Rewrite 1-indexed ``image N`` references to the student's view numbering.
+
+    ``mapping`` is 0-based on both sides, like ``renumber_frame_refs``' argument;
+    only the text is 1-indexed. Raises on a reference the student was not given,
+    for the same reason: a stale view number is a silent semantic corruption, not
+    a crash, and it is invisible in every metric we log.
+    """
+
+    def replace(match: re.Match) -> str:
+        word, old = match.group(1), int(match.group(2)) - 1
+        if old not in mapping:
+            raise KeyError(f"question references image {old + 1}, which is not in the student's views")
+        return f"{word} {mapping[old] + 1}"
+
+    return IMAGE_REF_RE.sub(replace, text)
 
 
 def choose_views(

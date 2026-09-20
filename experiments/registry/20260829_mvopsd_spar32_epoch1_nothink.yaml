@@ -1,0 +1,154 @@
+experiment_id: 20260829_mvopsd_spar32_epoch1_nothink
+title: "spar_32view 完整 1 epoch（228 步）：teacher non-thinking + 摘除 oo_* + boxed_lastline 验证"
+status: cancelled  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-29T01:14:00+08:00"
+started_at: "2026-08-29T17:58:00+08:00"
+restarted_at: "2026-08-29T17:58:00+08:00"
+finished_at: "2026-08-29T22:04:00+08:00"
+first_start_aborted_at: "2026-08-29T01:36:30+08:00"
+owner: "cursor-window-mvopsd"
+driver_pid: 772973
+train_log: logs/train/20260829_mvopsd_spar32_epoch1_nothink/train_20260829_175906.log
+cancelled_reason: "用户要求 SPAR 全量（含 3-view）并按 N 分预算；改开 20260829_mvopsd_spar_all_epoch1_nothink。停在约 step 100。"
+previous_abort: "01:14 首次启动在 step 0 评测被停。17:58 重开后于 22:04 因数据改设计再次停止。"
+
+goal: >
+  在 teacher/student 两侧同为 non-thinking 的前提下，用 SPAR 32-view 单源跑满 1 epoch。
+  这是 `20260821_mvopsd_single_source` 里未启动的 spar_32view arm，共享失效机制
+  （teacher thinking 异态）已由 `20260824_teacher_thinking_off` 排除（LESSON-029）。
+
+hypothesis: >
+  在 teacher 可靠性加权约 27.1% 的池上（摘除 spatial_imagination_oo_*），
+  non-thinking 同态蒸馏跑满 1 epoch 后，VSI-Bench 会出现可判读的方向
+  （相对 step 0 上行 / 平坦 / 下行）。本轮不是单变量消融；正负结果都有信息。
+
+design:
+  data_source: spar_32view
+  pool:
+    raw_plan_rows: 21025
+    after_teacher_cap_8: 21025
+    after_drop_spatial_imagination_oo: 15155
+    train_rows: 14655
+    holdout_rows: 500
+    dropped_oo:
+      spatial_imagination_oo_video: 3237
+      spatial_imagination_oo_video_hard: 2633
+    teacher_reliability_estimate: "27.1%（全截 8 视角口径下摘除 oo_*；见 20260821 registry）"
+    why_drop_oo: >
+      ISSUE-T05：oo_* 全匹配仅 1.3~1.5%，主因是答不全三轴而非答错（轴上准确率 ~68%）。
+      可靠性报告建议改 prompt 前先从蒸馏目标摘掉。
+  view_budget:
+    teacher_cap: 8
+    k_menu: [2, 3, 4, 5]
+    mean_k: 3.69
+    mean_teacher_n: 8.0
+    dangling_frame_refs: 0
+  total_steps: 228
+  epochs: 1.0
+  rationale_for_228: "14,655 / 64 = 228.98，取 228 步即整份训练池恰好遍历一遍不重样"
+  test_freq: 25
+  save_freq: 25
+  shared_with_vlm3r_epoch1:
+    - "teacher_enable_thinking=False（mvopsd.yaml 默认）"
+    - "student enable_thinking=false"
+    - "lr 2e-6 / batch 64 / rollout.n=1 / frozen teacher"
+    - "vsibench_boxed_primary=True / trust_boxed=True"
+    - "VAL_DO_SAMPLE=1 t=1.0 top_p=0.8"
+  changed_vs_vlm3r_epoch1:
+    - "数据源：vlm3r_scannet -> spar_32view（摘除 oo_*）"
+    - "VAL_FILE：vsibench_val_boxed.parquet -> vsibench_val_boxed_lastline.parquet"
+    - "JUDGE：本轮默认 0（规则 + boxed_primary；与 20260828 lastline 离线口径一致）"
+
+anchors:
+  step_0_note: >
+    boxed_lastline + sample 口径下，基座离线锚点约 46.51%（rule，20260828）。
+    训练内 step 0 若落在 53 附近，说明 VAL_FILE 指到了 plain 或 boxed 后缀未生效。
+  comparability: >
+    与 vlm3r epoch1（boxed-only prompt）不可并列；与历史 greedy/plain 53.6 带不可并列。
+    本轮只能自比 step 0 → 后续点。
+
+primary_metric: "val-core/vsibench/overall/acc 走势（自比）"
+must_watch:
+  - "step 0 应落在 ~42–48 带（boxed_lastline + sample），不是 53"
+  - "训练 response_length/mean 与 clip_ratio（健康参考 20260824：~187–234 / ~0）"
+  - "val-aux/vsibench/resp_tokens 的 median 与 p95"
+  - "self_distillation/teacher_probe 恒定（预期 0.04456961154937744）"
+  - "self_distillation/policy_fallback_fraction 恒 0"
+  - "val-aux/vsibench/boxed/frac"
+
+data:
+  plan_full: data/mvopsd/plan_single_spar_32view/
+  plan_filtered: data/mvopsd/plan_single_spar_32view_no_oo/
+  train_file: data/mvopsd/parquet_single_spar_32view_no_oo/main_train.parquet
+  holdout_file: data/mvopsd/parquet_single_spar_32view_no_oo/main_holdout.parquet
+  val_file: data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet
+  prompt_length_check:
+    student: {max: 1137, cap: 4096, over: 0}
+    teacher_nonthinking: {max: 1738, cap: 12288, over: 0}
+    dangling_frame_refs: 0
+    view_files_checked: "86,309 referenced, unreadable or misaligned = 0"
+
+launch:
+  node: node-A
+  gpus: 8
+  command: |
+    env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL \
+        -u CONDA_PYTHON_EXE PATH=/usr/bin:/usr/local/bin:/bin \
+      EXPERIMENT_NAME=20260829_mvopsd_spar32_epoch1_nothink \
+      TRAIN_FILE=$PWD/data/mvopsd/parquet_single_spar_32view_no_oo/main_train.parquet \
+      VAL_FILE=$PWD/data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet \
+      TOTAL_STEPS=228 TEST_FREQ=25 \
+      VAL_DO_SAMPLE=1 VAL_TEMPERATURE=1.0 VAL_TOP_P=0.8 VAL_N=1 \
+      JUDGE=0 \
+      bash scripts/opsd/run_mvopsd.sh main \
+        trainer.resume_mode=disable \
+        actor_rollout_ref.actor.self_distillation.teacher_enable_thinking=False
+  outputs:
+    train_log: logs/train/20260829_mvopsd_spar32_epoch1_nothink/
+    val_dump: logs/val/20260829_mvopsd_spar32_epoch1_nothink/
+    rollouts: rollouts/20260829_mvopsd_spar32_epoch1_nothink/
+    checkpoint: checkpoints/20260829_mvopsd_spar32_epoch1_nothink/
+  wandb: "slcheng/MV-OPSD，run 名即 experiment_name"
+
+wall_clock_estimate: >
+  训练 228 步 × ~33 s ≈ 2.1 h；评测约 10 点（step 0 + 每 25 步至 225）× ~30–35 min
+  （JUDGE=0）≈ 5–6 h；合计约 7–8 h。checkpoint ~10 个 × ~54 GB ≈ 0.5 T（盘余 3.1 T）。
+
+handoff:
+  current_phase: cancelled
+  last_updated: "2026-08-29T22:10:00+08:00"
+  current_task: "已取消；改跑 SPAR 全量合池"
+  owner: cursor-window-mvopsd
+  active_job_id: null
+  resources: ""
+  blocker: ""
+  next_action: "ckpt 留有 global_step_{25,50,75,100}；未按用户要求清理"
+
+activity_log:
+  - at: "2026-08-29T22:04:00+08:00"
+    what: >
+      用户要求 3-view 也进训练（teacher=3 / student 1–2；32-view teacher=8 / student 2–5）。
+      对进程组 772934 发 SIGTERM；8 卡归 0。最新 ckpt global_step_100。
+  - at: "2026-08-29T17:59:06+08:00"
+    what: >
+      正式训练重开（main_ppo PID 772973）。resolved config：
+      teacher_enable_thinking=False、enable_thinking=False、
+      total_training_steps=228、resume_mode=disable、VAL=boxed_lastline、val do_sample=True。
+  - at: "2026-08-29T17:58:00+08:00"
+    what: >
+      用户要求在 teacher non-thinking 下用 SPAR 训 OPSD。复用本 experiment_id
+      与 parquet_single_spar_32view_no_oo；checkpoint 目录为空，显式 resume_mode=disable。
+  - at: "2026-08-29T01:10:00+08:00"
+    what: >
+      构建 plan_single_spar_32view（21,025）→ 摘除 oo_*（15,155）→ parquet
+      train 14,655 / holdout 500；prompt 长度与 Frame 重编号校验通过。
+  - at: "2026-08-29T01:14:54+08:00"
+    what: >
+      正式训练启动（main_ppo PID 3383268）。resolved config 已确认
+      teacher_enable_thinking=False、student enable_thinking=False、
+      total_training_steps=228、VAL=boxed_lastline、val do_sample=True。
+  - at: "2026-08-29T01:14:00+08:00"
+    what: "登记本 registry；准备在 node-A 启动正式训练"
+
+issues: []

@@ -105,7 +105,29 @@ m=\beta p_T+(1-\beta)p_S.
 - Holdout 数据集：MMVP、CV-Bench、MMStar、POPE
 - Baseline：原始 Qwen3.5；SFT on Self-Teacher；GRPO；DAPO；OPSD；DeepEyes、Thyme、DeepEyesV2、SenseNova-MARS 等 agentic 方法；多种开源与闭源 MLLM
 - 指标：各 benchmark accuracy（%）、六项细粒度 benchmark 宏平均、ZoomBench 平均单样本耗时的倒数
+- 评分方式：**级联判分，不是单一正则**（`eval/judge_qwenlm.py`，代码核实）。顺序为
+  ①归一化答案：截掉 `</think>` 之前全部内容，优先取 `<answer>...</answer>`，
+  否则从 `"Answer:"` 起截（`extract_answer`，行 108–116）；
+  ②POPE / MMVP 的专用 exact match；
+  ③`mathruler.grade_answer` 做数值/符号等价判定；
+  ④仅对 MCQ benchmark 做 `first_letter_match`；
+  ⑤**以上全部未命中才交给 LLM judge**（Qwen LM，max 2048 token，temperature 0，
+    prompt 为「判断 response 与 answer 是否同义，输出 Yes/No」，行 33–42）。
+  关键点：第④步的首字母匹配是**只用于「判对」的捷径**——命中即记正确，
+  不命中不记错，而是落到 LLM judge。这与 lmms_eval 让首字母**独自决定对错**
+  是完全不同的设计。
 - 关键超参数：JSD \(\beta=0.5\)，top-\(K=100\)，EMA \(\alpha=0.05\)，rollout max length 1024，1 epoch
+- 评测侧解码配置：论文正文**未报告**，但已从作者公开代码核实（本地副本
+  `/home/c30084464/Documents/code/Vision-OPD-main`，2026-08-20 查阅）：
+  - **max tokens = 32768**，temperature = 0，seed = 42，经 OpenAI 兼容 API（vLLM server）推理。
+    见 `eval/run_eval.sh:29` `MAX_TOKENS="${MAX_TOKENS:-32768}"`；
+    `scripts/run_paper_eval.sh:118` 硬编码 `--max_tokens 32768`；
+    `scripts/run_eval_after_train.sh:144` 与 `scripts/eval_checkpoints_30_45_vllm_gpt.sh:23` 同值。
+    注意 `eval/infer.py:141` 自身的 argparse 默认是 4096，但**四个脚本全部覆盖成 32768**，
+    只看 infer.py 会读错。
+  - 1024 只是**训练**的 on-policy rollout 上限（§4.1、§4.3.3），与评测无关，两者相差 32 倍。
+  - baseline Qwen3.5 用 `ENABLE_THINKING=False` 跑 non-thinking（README:67-72）；
+    Vision-OPD 自身不传该参数，走模型默认模板。
 
 ## 实验结论
 
@@ -337,6 +359,12 @@ m=\beta p_T+(1-\beta)p_S.
 - [ ] top-100 以外概率质量小于 \(10^{-13}\) 如何测得？不同温度、任务和模型下是否成立？
 - [ ] 多随机种子下 JSD 相对 KL、EMA 相对 frozen teacher 的小幅优势是否显著？
 - [ ] 训练成本相对 SFT/RLVR 如何？双视觉前向和 top-\(K\) teacher scoring 的显存、吞吐代价是多少？
+- [x] ~~评测时的生成长度上限、解码温度、停止条件和 evaluation harness 各是什么？~~
+      已由公开代码核实：32768 token、temperature 0、自研 harness + LLM judge 级联。
+      见「实验设置」。（2026-08-20）
+- [ ] LLM judge 用的具体是哪个 Qwen 模型？论文与脚本均未固定 judge 模型
+      （`--judge_model` / `--judge_model_path` 都由调用方传入，默认为空）。
+      judge 换型会直接改变表 1–3 的绝对值，这是复现的一个自由度。
 - [ ] 在 SpatialStack 的无框空间定位、3D/视频和长链规划任务中，特权视图 OPD 是否仍有效？
 
 ## 阅读日志
@@ -347,3 +375,19 @@ m=\beta p_T+(1-\beta)p_S.
 - 新增认识：同一模型可利用输入条件造成的能力差作为 privileged teacher；对自蒸馏而言，teacher target 的时间稳定性与 student-state 对齐同样关键。
 - 修正内容：将“无标签”限定为不使用答案标签和 verifier；未把带框全图结果解释为已学会无提示自主定位；记录公式与算法的 divergence 顺序不一致。
 - 下一步：核对公开代码中的 teacher EMA、模块冻结、top-\(K\) tail 实现与 KL 方向，并做无框/不放大/纯裁剪分解实验设计。
+
+### 2026-08-20
+
+- 阅读范围：作者公开代码的评测部分（本地副本 `/home/c30084464/Documents/code/Vision-OPD-main`）：
+  `eval/run_eval.sh`、`eval/infer.py`、`eval/judge_qwenlm.py`、`scripts/run_paper_eval.sh`
+  及仓库内已有的 `eval/judge/*` 输出。
+- 新增认识：评测 max tokens 是 **32768**，不是训练用的 1024，两者相差 32 倍；
+  评分是「规则捷径 + LLM judge 兜底」的级联，首字母匹配**只用于判对不用于判错**。
+  实测 hrbench-4k 约 25%、zoombench 约 89% 的样本最终由 LLM judge 裁定，
+  答案长度 p95 已达数千字符。
+- 修正内容：此前笔记只记了训练的 1024 rollout 上限，未区分训练与评测预算，
+  容易被误读成「评测也是 1024」。已在「实验设置」补全并标注 infer.py 默认 4096 的陷阱。
+- 对本项目的意义：Vision-OPD 说明评测预算可以远大于训练 rollout 上限，
+  我们 VSI-Bench 的 1024 可能偏紧；且它对格式的鲁棒性来自 judge 而非解析器，
+  我们没有 judge，解析器必须更强。跟进见 OPEN_QUESTIONS 的 Q-028、Q-029。
+- 下一步：本轮评测跑完后统计响应长度分布与 `vsibench_answered`，判断是否需要放宽预算或加 judge 兜底。

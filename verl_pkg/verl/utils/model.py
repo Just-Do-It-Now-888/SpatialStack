@@ -746,6 +746,9 @@ def extract_multi_modal_inputs(
     for key, values in multi_modal_inputs_collected.items():
         if has_image_bound:  # minicpm-o logic
             multi_modal_inputs[key] = values
+        elif key == "geometry_encoder_inputs":
+            # Per-sample stacked views; the geometry encoder expects a Python list.
+            multi_modal_inputs[key] = values
         else:
             multi_modal_inputs[key] = torch.cat(values, dim=0)
 

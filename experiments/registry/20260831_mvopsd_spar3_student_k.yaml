@@ -1,0 +1,274 @@
+experiment_id: 20260831_mvopsd_spar3_student_k
+title: "SPAR 3-view only：teacher=3，student K=1 vs K=2（同题嵌套）"
+status: completed  # planned | running | completed | failed | cancelled
+
+created_at: "2026-08-31T15:25:00+08:00"
+started_at: "2026-08-31T15:25:00+08:00"
+owner: "cursor-window-mvopsd"
+
+goal: >
+  老师 2026-08-31 建议：只用 SPAR 3-view 训练，做两个实验——teacher 固定 3 视角，
+  student 分别为 1 视角与 2 视角——观察 student 视角数的效应。
+
+hypothesis: >
+  在同一批合法样本上，student 从 1 张加到 2 张会缩小 teacher/student 的信息落差
+  （N/K 从 3.0 降到 1.5）。若方法有效，K=2 相对 step 0 应不差于 K=1；若两条臂
+  都相对 step 0 走平或下滑，则问题不在 student 视角数。
+
+design:
+  why_matched_pool: >
+    SPAR 3-view 共 34,470 条，其中 30,090 条 required_views=2，K=1 会丢掉被点名的帧。
+    若 K=1 只用 4,380 条、K=2 用全部 34,470 条，K 与题型/样本量绑死，无法观察视角效应。
+    两臂因此都限制在「K=1 与 K=2 都合法」的交集：4,380 条，嵌套抽帧，同一 train/holdout 划分。
+  source_plan: data/mvopsd/plan_single_spar_3view/
+  builder: scripts/opsd/build_spar3_student_k_plans.py
+  seed: 20260831
+  pool:
+    intersection: 4380
+    skipped_required_gt_k1: 30090
+    unique_scenes: 2449
+    train_rows: 4064
+    holdout_rows: 316
+    question_types:
+      distance_prediction_oc_mv: 1548
+      distance_infer_center_oo_mv: 1469
+      obj_spatial_relation_oc_mv: 763
+      spatial_imagination_map_mv: 467
+      spatial_imagination_oc_mv: 122
+      spatial_imagination_oo_mv: 11
+  nested: true
+  teacher_views: 3
+  arms:
+    k1:
+      experiment_name: 20260831_mvopsd_spar3_k1_epoch1_nothink
+      node: node-A
+      k_views_student: 1
+      mean_ratio: 3.0
+      train_file: data/mvopsd/parquet_spar3_k1/main_train.parquet
+      plan: data/mvopsd/plan_spar3_k1/
+    k2:
+      experiment_name: 20260831_mvopsd_spar3_k2_epoch1_nothink
+      node: node-B
+      k_views_student: 2
+      mean_ratio: 1.5
+      train_file: data/mvopsd/parquet_spar3_k2/main_train.parquet
+      plan: data/mvopsd/plan_spar3_k2/
+  total_steps: 63
+  epochs: 1.0
+  rationale_for_63: "4,064 / 64 = 63.5，取 63 步即整份训练池恰好遍历一遍不重样"
+  test_freq: 5
+  save_freq: 5
+  shared_protocol:
+    - "teacher_enable_thinking=False"
+    - "student enable_thinking=false"
+    - "lr 2e-6 / batch 64 / rollout.n=1 / frozen teacher"
+    - "vsibench_boxed_primary=True / trust_boxed=True"
+    - "VAL_FILE=vsibench_val_boxed_lastline.parquet"
+    - "VAL_DO_SAMPLE=1 t=1.0 top_p=0.8"
+    - "JUDGE=0"
+  prompt_length_check:
+    student_k1: {min: 198, p50: 255, max: 546, cap: 4096, over: 0}
+    student_k2: {min: 344, p50: 449, max: 740, cap: 4096, over: 0}
+    teacher_both: {min: 490, p50: 643, max: 934, cap: 12288, over: 0}
+    dangling_frame_refs: 0
+    view_files_checked: "12,562 referenced, unreadable or misaligned = 0"
+    nested_verified: "4064/4064 K=1 ⊂ K=2; same sample_id order; same holdout"
+
+anchors:
+  step_0_note: >
+    boxed_lastline + sample 口径下，基座离线锚点约 46.51%（rule，20260828）。
+    SPAR 全量同口径 step 0 = 46.71%。本轮 step 0 应落在同一带；若落在 53 附近，
+    说明 VAL_FILE 指错。
+  comparability: >
+    两臂互比、各自相对 step 0。不可与 SPAR 全量（混了 32-view）或 greedy/plain 53.6 带并列。
+    结论只覆盖「required_views=1 的 SPAR 3-view 子集」，不能外推到点名两帧的那 30,090 条。
+
+primary_metric: "val-core/vsibench/overall/acc 走势（两臂互比 + 自比 step 0）"
+must_watch:
+  - "data/step/k_views_student/1/frac 在 k1 臂应为 1.0，k2 臂应为 0"
+  - "data/step/k_views_student/2/frac 在 k2 臂应为 1.0，k1 臂应为 0"
+  - "n_views_teacher 全程为 3"
+  - "训练 response_length/mean 与 clip_ratio"
+  - "self_distillation/teacher_probe 恒定（预期 0.04456961154937744）"
+  - "self_distillation/policy_fallback_fraction 恒 0"
+
+launch:
+  k1:
+    node: node-A
+    gpus: 8
+    command: |
+      env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL \
+          -u CONDA_PYTHON_EXE PATH=/usr/bin:/usr/local/bin:/bin \
+        EXPERIMENT_NAME=20260831_mvopsd_spar3_k1_epoch1_nothink \
+        TRAIN_FILE=$PWD/data/mvopsd/parquet_spar3_k1/main_train.parquet \
+        VAL_FILE=$PWD/data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet \
+        TOTAL_STEPS=63 TEST_FREQ=5 \
+        VAL_DO_SAMPLE=1 VAL_TEMPERATURE=1.0 VAL_TOP_P=0.8 VAL_N=1 \
+        JUDGE=0 \
+        bash scripts/opsd/run_mvopsd.sh main \
+          trainer.resume_mode=disable \
+          actor_rollout_ref.actor.self_distillation.teacher_enable_thinking=False
+  k2:
+    node: node-B
+    gpus: 8
+    command: |
+      env -u PYTHONNOUSERSITE -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL \
+          -u CONDA_PYTHON_EXE PATH=/usr/bin:/usr/local/bin:/bin \
+        EXPERIMENT_NAME=20260831_mvopsd_spar3_k2_epoch1_nothink \
+        TRAIN_FILE=$PWD/data/mvopsd/parquet_spar3_k2/main_train.parquet \
+        VAL_FILE=$PWD/data/eval/vsibench_verl/vsibench_val_boxed_lastline.parquet \
+        TOTAL_STEPS=63 TEST_FREQ=5 \
+        VAL_DO_SAMPLE=1 VAL_TEMPERATURE=1.0 VAL_TOP_P=0.8 VAL_N=1 \
+        JUDGE=0 \
+        bash scripts/opsd/run_mvopsd.sh main \
+          trainer.resume_mode=disable \
+          actor_rollout_ref.actor.self_distillation.teacher_enable_thinking=False
+
+wall_clock_estimate: >
+  训练 63 步 × ~33 s ≈ 0.6 h；评测约 14 点（step 0 + 每 5 步至 60，加末步）× ~30–35 min
+  （JUDGE=0）≈ 7–8 h；两机并行合计约 8–9 h。checkpoint 每臂约 14 个 × 54 GB ≈ 0.75 T，
+  两臂约 1.5 T；盘余 3.6 T 够用。
+
+training_results:
+  protocol: "boxed_lastline + sample t=1.0/top_p=0.8, JUDGE=0"
+  k1:
+    best_step: 55
+    step0_acc: 0.4627
+    best_acc: 0.4923
+    final_step: 63
+    final_acc: 0.4846
+    delta_vs_step0_pp: 2.96
+    checkpoint: checkpoints/20260831_mvopsd_spar3_k1_epoch1_nothink/global_step_55
+    wandb: https://wandb.ai/slcheng/MV-OPSD/runs/uqawyz9q
+  k2:
+    best_step: 15
+    step0_acc: 0.4765
+    best_acc: 0.4802
+    final_step: 63
+    final_acc: 0.4608
+    delta_vs_step0_pp: 0.37
+    checkpoint: "FSDP 已删（2026-09-07 node-B）；可用 output/20260831_mvopsd_spar3_k2_epoch1_nothink_global_step_15_hf"
+    wandb: https://wandb.ai/slcheng/MV-OPSD/runs/e4u79rpi
+  conclusion: >
+    K=1 相对 step 0 提升明显（+2.96 pp），K=2 几乎走平（+0.37 pp）且末步低于 step 0。
+    增加 student 视角数未带来收益；问题不在 student K 本身。
+
+generalization_eval:
+  status: vsibench_aborted_cvbench_rerun
+  started_at: "2026-09-01T11:20:00+08:00"
+  vsibench_stopped_at: "2026-09-01T13:44:00+08:00"
+  benchmarks: [cvbench, blink_spatial, sparbench, vsibench]
+  no_baseline: true
+  protocol:
+    launcher: scripts/evaluation/eval.sh
+    model_impl: qwen3_5
+    model_args: "pretrained=<hf_dir>,use_flash_attention_2=true,max_num_frames=32,max_length=12800,disable_thinking=true"
+    conda_env: sr_opsd
+    cvbench_note: >
+      20260901 目录下已完成的 cvbench 是旧 spatialstack（无 boxed 后缀 + word_boundary），
+      84.82/84.84 只属于那套。VSI 在 generate 中途按用户要求停止。
+  arms:
+    k1_best:
+      node: node-A
+      train_best_step: 55
+      fsdp_checkpoint: checkpoints/20260831_mvopsd_spar3_k1_epoch1_nothink/global_step_55
+      hf_dir: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+      output_root: logs/eval/20260831_mvopsd_spar3_k1_best_generalization
+    k2_best:
+      node: node-B
+      train_best_step: 15
+      fsdp_checkpoint: "已删（2026-09-07 node-B）；评测用 hf_dir"
+      hf_dir: output/20260831_mvopsd_spar3_k2_epoch1_nothink_global_step_15_hf
+      output_root: logs/eval/20260831_mvopsd_spar3_k2_best_generalization
+  comparability_notes:
+    - "离线 SPAR/MMSI/BLINK 用数据集全图，与训练 K 子采样无直接对应"
+    - "lmms-eval vsibench spatialstack 现与训练内 boxed_lastline val 对齐（题面后缀 + boxed_primary）；旧无后缀 dump 不可并列"
+    - "旧 cvbench 84.82/84.84 不可与 boxed_lastline 重跑并列"
+  results: {}  # filled after eval completes
+
+cvbench_boxed_lastline_rerun:
+  status: completed
+  started_at: "2026-09-01T13:45:00+08:00"
+  completed_at: "2026-09-01T15:00:00+08:00"
+  protocol:
+    CVBENCH_PROTOCOL: spatialstack
+    CVBENCH_PARSER: boxed_lastline
+    prompt: "MCA instruction and boxed last-line suffix on the same line (VSI val style)"
+    decoding: greedy 1024
+  base_anchor:
+    experiment_id: 20260901_qwen35base_cvbench_boxed_lastline
+    combined: 88.07
+    note: "替代旧离线默认 85.95；同协议比较才有效。"
+  arms:
+    k1:
+      node: node-A
+      hf_dir: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+      output_root: logs/eval/20260831_mvopsd_spar3_k1_cvbench_boxed_lastline
+      combined: 85.05
+      accuracy_2d: 79.85
+      accuracy_3d: 90.25
+      answered: 100.0
+      delta_vs_base_pp: -3.02
+    k2:
+      node: node-B
+      hf_dir: output/20260831_mvopsd_spar3_k2_epoch1_nothink_global_step_15_hf
+      output_root: logs/eval/20260831_mvopsd_spar3_k2_cvbench_boxed_lastline
+      combined: 86.80
+      accuracy_2d: 82.51
+      accuracy_3d: 91.08
+      answered: 99.32
+      delta_vs_base_pp: -1.27
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-01T16:10:00+08:00"
+  current_task: "CV-Bench boxed last-line 已出分；基座锚点改为 88.07"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: "VSI 全量未重开；勿引用 85.95 / 84.82 / 84.84"
+
+activity_log:
+  - at: "2026-09-07T23:43:00+08:00"
+    what: >
+      node-B 磁盘 100% 满。按用户要求删除
+      checkpoints/20260831_mvopsd_spar3_k2_epoch1_nothink/ 整树（691G，13×54G）。
+      HF merge output/..._k2..._global_step_15_hf（9.7G）保留。训练日志未动。
+  - at: "2026-09-02T11:31:00+08:00"
+    what: >
+      按用户要求清理 FSDP：只保留 global_step_55（训练内最佳 49.23%），
+      删除 5/10/15/20/25/30/35/40/45/50/60/63。latest_checkpointed_iteration=55。
+      HF merge output/..._global_step_55_hf 未动。
+  - at: "2026-08-31T15:27:21+08:00"
+    what: >
+      两臂并行启动。node-A K=1：run_mvopsd 29481 / main_ppo 29504，
+      日志 logs/train/20260831_mvopsd_spar3_k1_epoch1_nothink/train_20260831_152721.log。
+      node-B K=2：run_mvopsd 758959 / main_ppo 758966，
+      日志 logs/train/20260831_mvopsd_spar3_k2_epoch1_nothink/train_20260831_152720.log。
+      命令行已核验 TOTAL_STEPS=63、TEST_FREQ=SAVE_FREQ=5、teacher_enable_thinking=False、
+      VAL boxed_lastline + sample t=1.0/top_p=0.8、JUDGE=0、resume_mode=disable。
+  - at: "2026-08-31T15:22:00+08:00"
+    what: >
+      建成嵌套 plan（seed 20260831）：交集 4,380，跳过 required_views=2 的 30,090。
+      parquet train 4,064 / holdout 316；K=1 ⊂ K=2 为 4064/4064；prompt 超限 0；
+      teacher 峰值 934 < 12288。
+
+activity_log_eval:
+  - at: "2026-09-01T16:10:00+08:00"
+    what: >
+      基座 CV-Bench 对外数字改为 boxed last-line 88.07，替代 85.95。
+      同口径 K=1 85.05（−3.02）、K=2 86.80（−1.27）。
+  - at: "2026-09-01T13:47:00+08:00"
+    what: >
+      按用户要求 SIGTERM 两机未完成的 vsibench。旧 20260901 目录未覆盖。
+      新输出 logs/eval/20260831_mvopsd_spar3_k{1,2}_cvbench_boxed_lastline；
+      k1 PID 1390732，k2 PID 1549993。node-B 已 rsync cvbench_scoring.py 与
+      tasks/cvbench/utils.py。
+  - at: "2026-09-01T11:20:00+08:00"
+    what: >
+      登记 generalization eval：k1 best step55 / k2 best step15；
+      benchmark=cvbench,blink_spatial,sparbench,vsibench；无基座对照。
+      两机 GPU 已确认空闲。
+
+issues: []

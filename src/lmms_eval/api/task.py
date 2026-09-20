@@ -1047,7 +1047,14 @@ class ConfigurableTask(Task):
         if dataset_kwargs is not None and "load_from_disk" in dataset_kwargs and dataset_kwargs["load_from_disk"]:
             # using local task in offline environment, need to process the online dataset into local format via
             # `ds = load_datasets("lmms-lab/MMMU")`
-            self.dataset = datasets.load_from_disk(dataset_path=self.DATASET_PATH)
+            loaded = datasets.load_from_disk(dataset_path=self.DATASET_PATH)
+            # Some local dumps (e.g. BLINK subtasks) are a single-split Dataset,
+            # not a DatasetDict. Downstream expects named splits and `.copy()`.
+            if isinstance(loaded, datasets.Dataset):
+                split = self.config.test_split or self.config.validation_split or "val"
+                self.dataset = datasets.DatasetDict({split: loaded})
+            else:
+                self.dataset = loaded
         else:
             self.dataset = datasets.load_dataset(
                 path=self.DATASET_PATH,

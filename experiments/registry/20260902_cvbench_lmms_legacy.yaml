@@ -1,0 +1,86 @@
+experiment_id: 20260902_cvbench_lmms_legacy
+title: "基座 + SPAR3 K=1 step 55：CV-Bench lmms_legacy（original）"
+status: completed
+completed_at: "2026-09-02T12:57:33+08:00"
+
+created_at: "2026-09-02T12:51:00+08:00"
+owner: cursor-window-mvopsd
+node: node-A
+
+goal: >
+  用户要求按 original 协议给基座和 SPAR3 K=1 step 55 打 CV-Bench。
+  本仓库里这套是 CVBENCH_PROTOCOL=lmms_legacy：上游 16-token、首 [A-F] 解析、
+  含 video preamble。不覆盖 boxed last-line dump（基座 88.07 / K=1 85.05）。
+
+protocol:
+  launcher: scripts/evaluation/eval.sh
+  conda_env: sr_opsd
+  CVBENCH_PROTOCOL: lmms_legacy
+  decoding: greedy
+  max_new_tokens: 16
+  disable_thinking: true
+  model_impl: qwen3_5
+  hf_offline: true
+
+arms:
+  base:
+    model: models/Qwen3.5-4B
+    output_root: logs/eval/20260902_qwen35base_cvbench_lmms_legacy
+    results_json: logs/eval/20260902_qwen35base_cvbench_lmms_legacy/cvbench/models__Qwen3.5-4B/20260902_125124_results.json
+    status: done
+    combined: 62.85
+    accuracy_2d: 67.28
+    accuracy_3d: 58.42
+    answered: 75.06
+    Count: 66.50
+    Relation: 70.15
+    Distance: 22.50
+    Depth: 94.33
+  k1_step55:
+    hf: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+    output_root: logs/eval/20260902_spar3_k1_step55_cvbench_lmms_legacy
+    results_json: logs/eval/20260902_spar3_k1_step55_cvbench_lmms_legacy/cvbench/output__20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf/20260902_125346_results.json
+    status: done
+    combined: 5.55
+    accuracy_2d: 11.10
+    accuracy_3d: 0.00
+    answered: 23.81
+    Count: 19.04
+    Relation: 1.69
+    Distance: 0.00
+    Depth: 0.00
+
+vs_spatialstack_boxed_lastline:
+  base: {lmms_legacy: 62.85, spatialstack: 88.07}
+  k1_step55: {lmms_legacy: 5.55, spatialstack: 85.05}
+  note: >
+    SPAR3 在 16-token 上几乎全是截断 CoT，首字母解析读成 Based/To 的 B/T，
+    3D 0 分、作答仅 23.8%。这是协议假象，不是 boxed last-line 上的 −3 相对基座。
+
+comparability:
+  do_not_mix:
+    - "基座 boxed last-line 88.07"
+    - "SPAR3 K=1 boxed last-line 85.05"
+    - "旧 word_boundary 无 boxed 后缀 85.95 / 84.82"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-02T12:58:00+08:00"
+  current_task: "lmms_legacy 基座 62.85 / SPAR3 5.55 已落盘"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: "对外能力对比仍用 boxed last-line；lmms_legacy 只说明格式/截断"
+
+issues: []
+activity_log:
+  - at: "2026-09-02T12:57:33+08:00"
+    what: >
+      两臂 status=0。基座 combined 62.85（2D 67.28 / 3D 58.42 / 作答 75.06%）；
+      SPAR3 step55 combined 5.55（2D 11.10 / 3D 0.00 / 作答 23.81%）。8 卡已释放。
+  - at: "2026-09-02T12:51:00+08:00"
+    what: >
+      启动链式评测。wrapper 3316916；CVBENCH_PROTOCOL=lmms_legacy。
+      先基座 MASTER_PORT=29535，再 step55 MASTER_PORT=29536。
+      日志 logs/eval/20260902_cvbench_lmms_legacy/nohup.out。

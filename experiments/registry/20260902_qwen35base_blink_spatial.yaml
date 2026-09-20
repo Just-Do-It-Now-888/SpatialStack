@@ -1,0 +1,81 @@
+experiment_id: 20260902_qwen35base_blink_spatial
+title: "Qwen3.5-4B 基座：BLINK-Spatial original + spatialstack"
+status: completed
+completed_at: "2026-09-02T12:42:00+08:00"
+
+created_at: "2026-09-02T12:34:00+08:00"
+owner: cursor-window-mvopsd
+node: node-A
+
+goal: >
+  对发布基座 models/Qwen3.5-4B 分别用 BLINK original（句首字母）
+  和 spatialstack（VSI boxed last-line）评 blink_spatial val。
+  与 SPAR3 K=1 step 55 的 13.05 / 68.92 对照。两套 dump 分目录。
+
+model: models/Qwen3.5-4B
+
+protocol:
+  launcher: scripts/evaluation/eval.sh
+  conda_env: sr_opsd
+  benchmark: blink_spatial
+  split: val
+  decoding: greedy
+  max_new_tokens: 1024
+  disable_thinking: true
+  model_impl: qwen3_5
+  hf_offline: true
+
+arms:
+  original:
+    BLINK_PROTOCOL: original
+    output_root: logs/eval/20260902_qwen35base_blink_spatial_original
+    results_json: logs/eval/20260902_qwen35base_blink_spatial_original/blink_spatial/models__Qwen3.5-4B/20260902_123448_results.json
+    status: done
+    blink_spatial_macro: 75.30
+    blink_multi_view_reasoning: 55.64
+    blink_relative_depth: 81.45
+    blink_spatial_relation: 88.81
+  spatialstack:
+    BLINK_PROTOCOL: spatialstack
+    VSIBENCH_BOXED_PRIMARY: "1"
+    until: []
+    output_root: logs/eval/20260902_qwen35base_blink_spatialstack
+    results_json: logs/eval/20260902_qwen35base_blink_spatialstack/blink_spatial/models__Qwen3.5-4B/20260902_123529_results.json
+    status: done
+    blink_spatial_macro: 65.99
+    blink_multi_view_reasoning: 36.09
+    blink_relative_depth: 81.45
+    blink_spatial_relation: 80.42
+
+vs_spar3_k1_step55:
+  original: {base: 75.30, spar3: 13.05, delta: -62.25}
+  spatialstack: {base: 65.99, spar3: 68.92, delta: +2.93}
+  note: >
+    original 上 SPAR3 崩盘是格式：基座还能把选项字母放在句首，
+    SPAR3 写 CoT（To determine / Based on）。spatialstack 才是可比能力口径，
+    SPAR3 略高于基座。
+
+comparability:
+  do_not_mix:
+    - "original 与 spatialstack 分数"
+    - "同一模型两协议之间的高低不代表能力变化"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-02T12:42:00+08:00"
+  current_task: "基座 original 75.30 / spatialstack 65.99 已落盘"
+  owner: cursor-window-mvopsd
+  active_job_id: ""
+  resources: ""
+  blocker: ""
+  next_action: "对外用 spatialstack 对照基座 65.99 vs SPAR3 68.92；original 只说明格式服从"
+
+issues: []
+activity_log:
+  - at: "2026-09-02T12:42:00+08:00"
+    what: >
+      两臂均 status=0。original 宏平均 75.30；spatialstack 宏平均 65.99。8 卡已释放。
+  - at: "2026-09-02T12:34:00+08:00"
+    what: >
+      启动链式评测。wrapper 3305878；先 original MASTER_PORT=29533，
+      再 spatialstack MASTER_PORT=29534。日志 logs/eval/20260902_qwen35base_blink_spatial/nohup.out。

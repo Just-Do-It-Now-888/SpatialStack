@@ -1,0 +1,79 @@
+experiment_id: 20260908_lastline_prompt
+title: "VSI / BLINK / CV lastline 题面（SPAR 措辞，无 boxed）：基座 vs SPAR3 K=1 step 55"
+status: completed
+created_at: "2026-09-08T16:10:00+08:00"
+finished_at: "2026-09-08T17:16:35+08:00"
+owner: cursor-window-mvopsd
+
+goal: >
+  按用户口径重跑缺的 lastline 题面：后缀与 SPAR-Bench 逐字相同
+    （ The final answer MUST BE put on the last line of your response.），
+  解析末行、不认 \\boxed{}。original 题面不重生成（VSI 已是末行；BLINK original
+  已末行重打）。SPAR lastline 已有 39.72/42.16，不重跑。
+
+environment:
+  conda_env: sr_opsd
+  nodes: node-A
+  gpus_per_node: 8
+  gpu_type: H20
+
+models:
+  base: models/Qwen3.5-4B
+  spar3: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+
+evaluation:
+  status: completed
+  entrypoint: scripts/opsd/run_lastline_prompt_chain.sh
+  command: >
+    setsid nohup bash scripts/opsd/run_lastline_prompt_chain.sh
+    > logs/eval/20260908_lastline_prompt/driver.log 2>&1
+  parameters:
+    prompt_suffix: " The final answer MUST BE put on the last line of your response."
+    parser: lastline
+    boxed_primary: false
+    decoding: greedy
+    vsi: spatialstack_plain + suffix @2048 vLLM TP=8
+    blink: BLINK_PROTOCOL=lastline @1024 vLLM TP=8
+    cv: parquet question + suffix, parser=lastline @1024 vLLM TP=8
+  artifacts:
+    eval_root: logs/eval/20260908_lastline_prompt
+  metrics:
+    vsi_base: 49.03
+    vsi_spar3: 49.02
+    vsi_delta: -0.01
+    vsi_answered_pct: [96.20, 97.12]
+    vsi_trunc_pct: [1.83, 1.60]
+    blink14_base: 63.43
+    blink14_spar3: 64.94
+    blink14_delta: 1.51
+    blink_spatial3: [67.62, 67.55]
+    blink_answered_pct: [90.90, 95.74]
+    blink_trunc_pct: [7.42, 4.42]
+    cv_base: 71.04
+    cv_spar3: 83.84
+    cv_delta: 12.80
+    cv_2d: [57.66, 77.51]
+    cv_3d: [84.42, 90.17]
+    cv_answered_pct: [78.81, 98.33]
+    cv_trunc_pct: [0.30, 0.08]
+    notes: >
+      CV 为 vLLM lastline，不可与 HF boxed 88.07/85.05 并列。
+      基座 CV 作答仅 78.81%，+12.80 含格式差。
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-08T17:20:00+08:00"
+  active_job_id: null
+  owner: cursor-window-mvopsd
+  resources: "node-A 8×H20 idle"
+  next_action: none
+
+issues: []
+
+activity_log:
+  - timestamp: "2026-09-08T16:10:00+08:00"
+    event: launched
+    detail: "node-A GPUs idle; skip SPAR and original regenerations"
+  - timestamp: "2026-09-08T17:16:35+08:00"
+    event: completed
+    detail: "ALL DONE; scores written to 评测对照"

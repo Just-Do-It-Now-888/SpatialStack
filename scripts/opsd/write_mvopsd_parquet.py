@@ -37,18 +37,41 @@ from mvopsd import views as vw  # noqa: E402
 from mvopsd.geometry import visual_tokens  # noqa: E402
 
 
-def build_row(record: dict, cache_root: str, arm: str) -> dict:
+def build_row(
+    record: dict,
+    cache_root: str,
+    arm: str,
+    pixel_caps: dict | None = None,
+    system_prompt: str = "",
+) -> dict:
     student_views = record["view_indices"]
-    teacher_views = student_views if arm == "noprivilege" else list(range(record["n_views"]))
+    # `teacher_view_indices` lets a plan cap the teacher's album below N
+    # (build_single_source_plans.py caps it at 8). Absent, the teacher sees the
+    # whole album, which is what every plan before 2026-08-21 meant. `teacher_body`
+    # travels with it because truncating an album renumbers the Frame-N references
+    # the question makes.
+    if arm == "noprivilege":
+        teacher_views = student_views
+    else:
+        teacher_views = record.get("teacher_view_indices") or list(range(record["n_views"]))
 
     student_prompt = vw.build_prompt(record["header_style"], len(student_views), record["student_body"])
     if arm == "noprivilege":
         teacher_prompt = student_prompt
     else:
-        teacher_prompt = vw.build_prompt(record["header_style"], len(teacher_views), record["body"])
+        teacher_body = record.get("teacher_body") or record["body"]
+        teacher_prompt = vw.build_prompt(record["header_style"], len(teacher_views), teacher_body)
 
     def paths(view_indices):
-        return [{"path": os.path.join(cache_root, record["frames"][i]["cache"])} for i in view_indices]
+        # verl has no min_pixels knob of its own: fetch_image reads the caps out
+        # of each image dict, so this is the only place the visual budget is set.
+        # Absent (the default), qwen_vl_utils' own wide defaults apply, which is
+        # what every pool before 2026-09-07 relied on -- their cached views were
+        # already pinned to one geometry by the VGGT chain.
+        return [
+            {"path": os.path.join(cache_root, record["frames"][i]["cache"]), **(pixel_caps or {})}
+            for i in view_indices
+        ]
 
     student_images = paths(student_views)
     teacher_images = paths(teacher_views)
@@ -58,10 +81,18 @@ def build_row(record: dict, cache_root: str, arm: str) -> dict:
     if teacher_prompt.count(vw.IMAGE_TOKEN) != len(teacher_images):
         raise AssertionError(f"{record['sample_id']}: teacher placeholder/image mismatch")
 
+    # A system turn is not cosmetic. The MindCube SFT round trained with
+    # data_qwen.py's "You are a helpful assistant." on every sample and its
+    # tinybench evaluation sends the same, so a pool initialised from those
+    # checkpoints has to carry it or the student starts out of distribution. The
+    # SPAR/llava pools deliberately omit it: they distil from the released base
+    # model, which never had one either.
+    system_turn = [{"role": "system", "content": system_prompt}] if system_prompt else []
+
     return {
         "data_source": record["source"],
-        "prompt": [{"role": "user", "content": student_prompt}],
-        "teacher_prompt": [{"role": "user", "content": teacher_prompt}],
+        "prompt": system_turn + [{"role": "user", "content": student_prompt}],
+        "teacher_prompt": system_turn + [{"role": "user", "content": teacher_prompt}],
         "images": student_images,
         "teacher_images": teacher_images,
         "ability": "spatial_reasoning",
@@ -81,6 +112,10 @@ def build_row(record: dict, cache_root: str, arm: str) -> dict:
             "view_selection": record["view_selection"],
             "privilege_bucket": "none" if arm == "noprivilege" else record["privilege_bucket"],
             "answer_view_sensitive": bool(record["answer_view_sensitive"]),
+            # MindCube's pair rows keep a two-view question above one image by
+            # decision. Their data_source already isolates them; this flag lets a
+            # reader exclude them without knowing the naming convention.
+            "prompt_matches_view_count": bool(record.get("prompt_matches_view_count", True)),
         },
     }
 
@@ -91,12 +126,35 @@ def main() -> None:
     parser.add_argument("--cache-root", default="data/mvopsd/views")
     parser.add_argument("--out", default="data/mvopsd/parquet")
     parser.add_argument("--arms", default="main,noprivilege")
+    parser.add_argument(
+        "--require-equal-views",
+        action="store_true",
+        help="refuse to write if any row has n_views_teacher != k_views_student (Answer-OPSD)",
+    )
     parser.add_argument("--holdout-per-source", type=int, default=500)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--check-files", action="store_true", help="verify every referenced view exists")
     parser.add_argument("--per-view-tokens", type=int, default=192)
     parser.add_argument("--max-teacher-visual-tokens", type=int, default=8192)
+    parser.add_argument(
+        "--min-pixels",
+        type=int,
+        default=0,
+        help="written into every image dict; 0 leaves qwen_vl_utils' defaults in place",
+    )
+    parser.add_argument("--max-pixels", type=int, default=0)
+    parser.add_argument(
+        "--system-prompt",
+        default="",
+        help='prepended as a system turn to both prompts; MindCube needs "You are a helpful assistant."',
+    )
     args = parser.parse_args()
+
+    pixel_caps: dict[str, int] = {}
+    if bool(args.min_pixels) != bool(args.max_pixels):
+        raise SystemExit("--min-pixels and --max-pixels must be set together")
+    if args.min_pixels:
+        pixel_caps = {"min_pixels": args.min_pixels, "max_pixels": args.max_pixels}
 
     plan_dir = os.path.join(src.REPO_ROOT, args.plan)
     cache_root = os.path.join(src.REPO_ROOT, args.cache_root)
@@ -142,7 +200,21 @@ def main() -> None:
         for split, split_records in (("train", train), ("holdout", holdout)):
             if not split_records:
                 continue
-            rows = [build_row(record, cache_root, arm) for record in split_records]
+            rows = [
+                build_row(record, cache_root, arm, pixel_caps, args.system_prompt)
+                for record in split_records
+            ]
+            if args.require_equal_views:
+                unequal = [
+                    row["extra_info"]["sample_id"]
+                    for row in rows
+                    if int(row["extra_info"]["n_views_teacher"]) != int(row["extra_info"]["k_views_student"])
+                ]
+                if unequal:
+                    raise SystemExit(
+                        f"--require-equal-views failed on {arm}_{split}: "
+                        f"{len(unequal)} rows with N!=K, e.g. {unequal[:5]}"
+                    )
             path = os.path.join(out_dir, f"{arm}_{split}.parquet")
             pd.DataFrame(rows).to_parquet(path, index=False)
             size_mb = os.path.getsize(path) / 1e6
@@ -189,7 +261,12 @@ def verify_views(records, cache_root: str, max_teacher_visual_tokens: int) -> No
     worst = Counter()
     peak = 0
     for record in records:
-        total = sum(tokens_by_path[os.path.join(cache_root, frame["cache"])] for frame in record["frames"])
+        # Only the views the teacher is actually shown count against its context;
+        # a capped album leaves the rest of record["frames"] on disk unused.
+        shown = record.get("teacher_view_indices") or range(record["n_views"])
+        total = sum(
+            tokens_by_path[os.path.join(cache_root, record["frames"][index]["cache"])] for index in shown
+        )
         peak = max(peak, total)
         if total > max_teacher_visual_tokens:
             worst[record["source"]] += 1
@@ -209,10 +286,13 @@ def report(train, holdout, per_view_tokens: int) -> None:
     print(f"  {'TOTAL':<18} {total:>7}")
     print(f"  holdout: {len(holdout)} samples")
 
-    teacher_tokens = sum(record["n_views"] for record in train) / total * per_view_tokens
+    def teacher_views(record):
+        return len(record.get("teacher_view_indices") or range(record["n_views"]))
+
+    teacher_tokens = sum(teacher_views(record) for record in train) / total * per_view_tokens
     student_tokens = sum(record["k_views"] for record in train) / total * per_view_tokens
     print(f"\nmean visual tokens/sample: student {student_tokens:.0f}, teacher {teacher_tokens:.0f}")
-    print(f"max teacher visual tokens: {max(r['n_views'] for r in train) * per_view_tokens}")
+    print(f"max teacher visual tokens: {max(teacher_views(r) for r in train) * per_view_tokens}")
     print(f"expected grid_thw per view: {visual_tokens((512, 384))} tokens at 512x384")
 
 

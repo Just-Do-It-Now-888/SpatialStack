@@ -1,0 +1,82 @@
+experiment_id: 20260903_spar3_k1_step55_vsibench_plain
+title: "SPAR3 K=1 step 55 VSI-Bench：与基座相同的原始无 boxed 题面"
+status: completed
+completed_at: "2026-09-03T13:48:00+08:00"
+
+created_at: "2026-09-03T11:51:00+08:00"
+owner: cursor-window-mvopsd
+node: node-B
+
+goal: >
+  用与 20260902 基座相同的 spatialstack_plain prompt（无 \\boxed{} 后缀）
+  对 SPAR3 K=1 step 55 HF 重新生成。默认 boxed last-line 协议不变。
+
+protocol:
+  launcher: ARM=step55 bash scripts/opsd/run_vsibench_plain_base.sh
+  conda_env: sr_opsd
+  VSIBENCH_PROTOCOL: spatialstack_plain
+  VSIBENCH_BOXED_PRIMARY: "0"
+  decoding: greedy
+  max_new_tokens: 1024
+  until: []
+  frames: 32
+  disable_thinking: true
+  model_impl: qwen3_5
+  hf_offline: true
+  note: >
+    与基座 52.75 同题面、同 greedy 1024。不可与 boxed last-line 49.84 并列。
+
+arms:
+  step55:
+    model: output/20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf
+    output_root: logs/eval/20260903_spar3_k1_step55_vsibench_plain
+    status: done
+    wrapper_pid: 2668635
+    log: logs/eval/20260903_spar3_k1_step55_vsibench_plain/run.log
+    results_json: logs/eval/20260903_spar3_k1_step55_vsibench_plain/vsibench/output__20260831_mvopsd_spar3_k1_epoch1_nothink_global_step_55_hf/20260903_115233_results.json
+    wall_clock: "1:55:11 generate_until (10.77s/it per rank)"
+    overall: 47.87
+    answered_frac: 95.58
+    by_question_type:
+      object_counting: 40.07
+      object_abs_distance: 30.23
+      object_size_estimation: 64.64
+      room_size_estimation: 44.90
+      object_rel_distance: 58.17
+      object_rel_direction: 51.58
+      route_planning: 33.51
+      obj_appearance_order: 59.87
+
+results:
+  overall: 47.87
+  answered_pct: 95.58
+  vs_base_original_52_75: -4.88
+  generation_kwargs:
+    max_new_tokens: 1024
+    do_sample: false
+    until: []
+
+comparability:
+  do_not_mix:
+    - "离线 boxed last-line greedy 4096（SPAR3 49.84 / 基座 48.06）"
+    - "训练内 boxed_lastline + sample"
+  reading: >
+    original greedy 1024 下 SPAR3 47.87，低于同协议基座 52.75（Δ −4.88）。
+    跌分主要在 object_counting 与 room_size / abs_distance。
+    boxed last-line 上 SPAR3 是 +1.78，符号相反，两套协议不可加减。
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-03T13:55:00+08:00"
+  current_task: "SPAR3 original prompt 完成：47.87 / 作答 95.58%，相对基座 52.75 为 −4.88"
+  owner: cursor-window-mvopsd
+  resources: ""
+  next_action: "对外 original 口径写 52.75 vs 47.87；boxed 口径仍写 48.06 vs 49.84"
+
+activity_log:
+  - at: "2026-09-03T11:51:00+08:00"
+    what: "node-A 有 9.7G HF；node-B 原先没有，rsync 后跑 spatialstack_plain"
+  - at: "2026-09-03T11:52:00+08:00"
+    what: "启动 wrapper PID 2668635；VSIBENCH_PROTOCOL=spatialstack_plain；约 14.3 GiB/卡"
+  - at: "2026-09-03T13:48:00+08:00"
+    what: "完成；overall 47.87；8 卡已释放"

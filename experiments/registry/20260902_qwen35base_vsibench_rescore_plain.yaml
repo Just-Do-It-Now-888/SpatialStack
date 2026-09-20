@@ -1,0 +1,76 @@
+experiment_id: 20260902_qwen35base_vsibench_rescore_plain
+title: "基座 20260820 无 boxed dump，用现行 answer_tail 重打分（不占卡）"
+status: completed
+completed_at: "2026-09-02T21:55:54+08:00"
+
+created_at: "2026-09-02T21:52:00+08:00"
+owner: cursor-window-mvopsd
+node: cpu-only
+
+goal: >
+  不改 lmms-eval spatialstack 默认 boxed last-line 题面，也不覆盖 48.06 dump。
+  用现行 vsibench_scoring.answer_tail（VSIBENCH_BOXED_PRIMARY=0）重打
+  2026-08-20 基座无 boxed 生成，看 53.40 在现行抽取下是否还在。
+
+protocol:
+  launcher: scripts/opsd/tools/rescore_vsibench_samples.py
+  generation: reused
+  source_dump: logs/eval/20260820_qwen35base_vsi_anchor/frames_32/20260820/vsibench/models__Qwen3.5-4B/20260820_113832_samples_vsibench.jsonl
+  VSIBENCH_PROTOCOL: spatialstack
+  VSIBENCH_BOXED_PRIMARY: "0"
+  prompt_suffix: none
+  boxed_primary: false
+  decoding: greedy (original generation)
+  max_new_tokens: 1024
+  frames: 32
+  note: >
+    只重打分，不重新推理。spatialstack 默认 suffix 未改。
+    现行 answer_tail 是末行优先（2026-08-28 收紧），与 8-20 当时能扫答案句的读法不完全同一份代码。
+
+artifacts:
+  output_dir: logs/eval/20260820_qwen35base_vsi_anchor/rescore_answer_tail_nobox
+  summary: logs/eval/20260820_qwen35base_vsi_anchor/rescore_answer_tail_nobox/summary.json
+  samples: logs/eval/20260820_qwen35base_vsi_anchor/rescore_answer_tail_nobox/samples.jsonl
+
+results:
+  source_overall: 53.40
+  source_answered_pct: 99.98
+  rescore_overall: 52.75
+  rescore_answered_pct: 98.13
+  delta_overall: -0.65
+  rows_changed: 118
+  boxed_present: 0
+  by_question_type:
+    object_counting: 56.48
+    object_abs_distance: 36.89
+    object_size_estimation: 67.31
+    room_size_estimation: 54.13
+    object_rel_distance: 58.45
+    object_rel_direction: 55.74
+    route_planning: 35.05
+    obj_appearance_order: 57.93
+  reading: >
+    同一批无 boxed 短答，现行末行 answer_tail 给出 52.75，相对当时落盘 53.40 为 −0.65。
+    118 行改判；作答 99.98% → 98.13%。跌分几乎全在 obj_appearance_order
+    （当时约 63.59 → 57.93，84 行 parse_error）：现行规则不再从 CoT 正文里抠字母。
+    数值四题与方向/路线与源 dump 基本同高。这不是 boxed 协议（48.06），也不可并列。
+
+comparability:
+  do_not_mix:
+    - "离线 boxed last-line greedy 4096（基座 48.06）"
+    - "训练内 boxed_lastline + sample"
+    - "上游 lmms_legacy 16-token 首词解析"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-02T21:56:00+08:00"
+  current_task: "重打分完成；基座无 boxed dump 现行 answer_tail = 52.75（源 53.40，Δ −0.65）"
+  owner: cursor-window-mvopsd
+  resources: ""
+  next_action: "对外无 boxed 短答口径可写 52.75（现行抽取）或 53.40（源 dump）；不要改成 48.06"
+
+activity_log:
+  - at: "2026-09-02T21:55:54+08:00"
+    what: >
+      conda sr_opsd 跑 rescore；--no-boxed-primary；产物 rescore_answer_tail_nobox/。
+      未改 vsibench_doc_to_text，未动 20260901 boxed last-line dump。

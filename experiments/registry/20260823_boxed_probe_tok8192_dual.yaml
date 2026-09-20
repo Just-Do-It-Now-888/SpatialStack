@@ -1,0 +1,84 @@
+experiment_id: 20260823_boxed_probe_tok8192_dual
+title: "格式指令探针 tok8192：基座 vs 后训练（llava_hound step 175）"
+status: running  # 首次尝试 01:31 失败（ISSUE-403），11:51 重启
+created_at: "2026-08-23T01:20:00+08:00"
+finished_at: null
+owner: cursor-window-boxed-probe-8k
+node: node-A
+
+goal: >
+  在 max_tokens=8192 下复跑三条 prompt 臂（plain / boxed / answer），对比冻结基座与
+  MV-OPSD 后训练 checkpoint，观察 boxed 臂撞满预算比例、长度分布与 VSI 分数是否改善。
+
+models:
+  base: ./models/Qwen3.5-4B
+  post_trained: ./output/20260821_mvopsd_single_llava_hound_main_global_step_175_hf
+
+generation:
+  max_tokens: 8192
+  max_model_len: 20480
+  tensor_parallel: 8
+  temperature: 0.0
+
+design:
+  arms: [boxed]
+  skip_pool: true
+  datasets:
+    vsi: vsibench full 5130
+
+outputs:
+  base: logs/eval/boxed_probe_tok8192/base/
+  post_step175: logs/eval/boxed_probe_tok8192/post_step175/
+
+command: |
+  setsid nohup bash scripts/opsd/run_boxed_probe_tok8192_dual.sh \
+    > logs/eval/boxed_probe_tok8192/driver.log 2>&1
+
+activity_log:
+  - at: "2026-08-23T01:26:00+08:00"
+    what: "用户只要 boxed 臂；停掉三臂任务，ARMS=boxed 重启。回复写入 generations.jsonl / samples.jsonl。"
+  - at: "2026-08-23T01:31:40+08:00"
+    what: "基座 VSI boxed 在生成前失败；未产生 samples.jsonl，后训练模型未启动。"
+  - at: "2026-08-23T11:46:00+08:00"
+    what: "定位 ISSUE-403 根因：01:26 训练池那次被 kill 后，vLLM 引擎与 8 个 worker
+           成为孤儿进程（父进程 PID 1），持续占住 85 GB/卡 10 小时。清理后 8 卡全部释放。"
+  - at: "2026-08-23T11:49:00+08:00"
+    what: "顺带修 ISSUE-404（~/.local 的 pydantic 版本不匹配会打断 conda 侧 vllm 导入）。"
+  - at: "2026-08-23T11:51:49+08:00"
+    what: "重启成功：显存闸门通过（97,367 MiB 空闲/卡），依赖解析与归档两轮一致
+           （conda transformers 5.3.0 + vllm 0.18.0），KV cache 2,564,144 token，
+           20,480 token 请求并发上限 477x，8 卡满载生成中。"
+
+issues:
+  - id: ISSUE-403
+    status: resolved
+    symptom: "vLLM 在基座模型初始化阶段退出，双模型评测均未完成。"
+    evidence: >
+      8 张 GPU 启动时每张仅余 10.95/95.08 GiB，而 vLLM 按 0.9 利用率要求
+      85.58 GiB；日志报 Free memory ... is less than desired GPU memory utilization。
+      11:46 排查发现 VLLM::EngineCore 与 VLLM::Worker_TP0-7 共 9 个进程已运行
+      10h23m、父进程为 PID 1，正好对应 01:26 启动、01:30 被强制停止的训练池评测。
+      nvidia-smi 报的 PID 620900-620907 是这些进程在宿主命名空间下的编号，
+      因此在本容器里查不到，最初被误判为其他容器占用。
+    root_cause: >
+      强制停止驱动脚本只杀掉了启动器进程，vLLM 的引擎与 8 个 worker 被 init 收养后
+      继续持有全部显存，且利用率为 0%，从占用曲线上看不出是活跃任务。
+    solution: "kill 掉这 9 个孤儿进程，8 卡显存立即归零，随后重启评测成功。"
+    prevention: >
+      驱动新增两道防护：每个 arm 启动前检查最小空闲显存（MIN_FREE_MIB，默认 88000），
+      不足则写明状态后退出；以及 EXIT/INT/TERM 上 reap 掉 VLLM::EngineCore 与
+      VLLM::Worker_TP，使强制停止不再留下占卡的孤儿进程。
+  - id: ISSUE-404
+    status: resolved
+    symptom: "手工在 conda sr_opsd 里跑 VSI 评测时，import vllm 直接抛 pydantic 版本错误。"
+    evidence: >
+      ~/.local 下的 pydantic-core 2.46.4 与其 pydantic 要求的 2.41.5 不匹配，
+      而 ~/.local 会遮蔽 conda 的同名包；报错栈全部落在 ~/.local/.../vllm/。
+    root_cause: >
+      驱动原先在顶层 unset PYTHONNOUSERSITE 让用户目录可见，注释里的理由是归档数字
+      来自能看到用户目录的交互式 shell。但归档两轮的 run.log 实际解析到的是 conda 自带的
+      transformers 5.3.0 与 vllm 0.18.0，说明当时用户目录并未生效，注释与事实不符。
+    solution: "VSI 侧子 shell 内显式 export PYTHONNOUSERSITE=1，只用 conda 环境。"
+    prevention: >
+      两轮解析结果已逐行核对一致，且每次运行都把版本与路径打进 run.log；
+      训练池侧仍需用户目录（系统 python + ~/.local），因此只在 VSI 子 shell 内固定。

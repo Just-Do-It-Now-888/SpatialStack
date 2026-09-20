@@ -48,6 +48,69 @@
 - 结论：待实验。
 - 最后更新：2026-08-13
 
+### Q-028：Vision-OPD 评测时的生成长度上限与解码配置是什么？
+
+- 状态：resolved（由公开代码核实，非论文陈述）
+- 来源论文：[Vision-OPD](papers/vision-opd.md)（E-004、E-008）
+- 当前认识：论文正文未报告，代码给出明确答案（本地副本
+  `/home/c30084464/Documents/code/Vision-OPD-main`，2026-08-20）：
+  评测 **max tokens = 32768**、temperature 0、seed 42、OpenAI 兼容 API（vLLM）。
+  见 `eval/run_eval.sh:29`、`scripts/run_paper_eval.sh:118`、
+  `scripts/run_eval_after_train.sh:144`、`scripts/eval_checkpoints_30_45_vllm_gpt.sh:23`。
+  `eval/infer.py:141` 的 argparse 默认 4096 是**陷阱**，四个脚本全部覆盖。
+  1024 只是训练 rollout 上限，与评测相差 32 倍。
+  评分是级联：归一化（截 `</think>`、优先 `<answer>`）→ POPE/MMVP exact →
+  `mathruler.grade_answer` → MCQ 首字母（**仅用于判对，不判错**）→ LLM judge。
+- 实测证据（仓库内已有 judge 输出）：
+  hrbench-4k 每个 checkpoint 800 条里约 200 条（25%）落到 LLM judge；
+  zoombench 845 条里约 750 条（89%）走 LLM judge；
+  答案长度 hrbench-4k 中位数约 320–380 字符、p95 达 3.6k–8.3k 字符、最长 12 万字符。
+  即 **p95 就已经超过 1024 token**，32768 的预算确实在被用满。
+- 遗留：LLM judge 用哪个 Qwen 模型未固定，`--judge_model` 由调用方传入，默认为空。
+  换 judge 会改变表 1–3 的绝对值。
+- 对本项目的影响：我们的 1024 依据是对齐训练 rollout 上限
+  （`verl` 的 `data.max_response_length`），与 Vision-OPD 的评测配置**不同源**。
+  Vision-OPD 的做法说明「评测预算可以远大于训练 rollout 上限」是可接受的，
+  1024 反而可能偏紧。是否放宽见 Q-029。
+- 最后更新：2026-08-20
+
+### Q-029：我们的 VSI-Bench 评测预算 1024 是否偏紧，是否应引入 judge 兜底？
+
+- 状态：experiment
+- 来源论文：[Vision-OPD](papers/vision-opd.md)（评测代码）
+- 当前认识：Vision-OPD 用 32768 + LLM judge 兜底；我们用 1024 + 规则解析。
+  两处差异各自独立：预算决定答案是否被截断，兜底决定截断/异常格式如何计分。
+  Vision-OPD 的首字母匹配只用于判对、不判错，落空即交 judge，
+  因此它对格式的鲁棒性来自 judge 而不是解析器；我们没有 judge，
+  全部压力都在解析器上，所以解析器必须比它的更强。
+- 相互冲突的证据：暂无实测。VSI-Bench 是短答案型（选项 2–4 个或单个数字），
+  与 hrbench/zoombench 的开放程度不同，1024 未必构成截断。
+- 需要查阅：本轮 khalf step 120 跑完后的 `vsibench_answered` 与响应长度分布。
+- 可验证实验：
+  1. 从本轮 sample dump 统计响应 token 长度分布，看 p95/p99 是否贴近 1024；
+     贴近则说明确实被截断，需要放宽。
+  2. `vsibench_answered` 若明显低于 100%，抽查未解析样本，判断是截断还是格式意外。
+  3. 若确认需要兜底，可复用 `mvopsd_judge.py` 的握手方式加一个 judge 阶段，
+     但必须保留纯规则分数并列报告，否则与历史数字不可比。
+- 实测（基座 anchor，5,130 条，32 帧，1024 token）：
+  - **预算**：截断 105/5130（2.05%，HF）与 112/5130（2.18%，vLLM），
+    两套 harness 高度一致。中位数仅 3~4 token，p95 约 341~343，
+    即绝大多数回答远未触顶。截断几乎全部集中在 `obj_appearance_order`
+    （96/618，15.5%），该题型要按首次出现排序四个物体，模型会逐帧枚举。
+    → 1024 对九个题型足够，只对 `obj_appearance_order` 偏紧。
+  - **兜底**：judge 已接入（`scripts/opsd/tools/judge_vsibench.py`，gpt-oss-120b）。
+    以 benchmark 自身判据衡量（judge 只抽取选项、评分仍用 exact match，
+    覆盖全部 2,490 条 MCA），overall 53.40 → 53.47，**仅 +0.08**，
+    翻转 11 对 7 近似对称 → **规则解析器不需要 judge 兜底**。
+    照搬 Vision-OPD 的 Yes/No 级联会得到 +1.49，但那是判据错位加单向施加
+    造成的假象，详见 LESSON-019。
+- 结论：预算维持 1024（`obj_appearance_order` 单独存疑，见下）；
+  judge 不作为默认计分环节，仅作为定期校验解析器的工具保留。
+  未解决：截断的 96 条 `obj_appearance_order` 中，规则解析器会从正文回显的
+  选项列表里取到字母并可能蒙对，judge 抽取时则正确返回 NONE（92 条无法抽取）。
+  这批行当前保留规则分。是否应判 0、或对该题型单独放宽预算，待定。
+- 最后更新：2026-08-20
+
 ### Q-007：VA-OPD 提升的是学生真实视觉依赖，还是教师代理指标上的视觉依赖？
 
 - 状态：experiment
@@ -267,6 +330,17 @@
 - 可验证实验：做gate-only、weight-only、sign×constant、clipped weight、weight-sum normalization与gradient-norm-matched controls。
 - 结论：待核对与实验。
 - 最后更新：2026-08-13
+
+### Q-030：短答案或空间题解特权是提升推理，还是只诱发抄答案？
+
+- 状态：experiment
+- 来源论文：[OPSD](papers/opsd.md)（E-002、E-006）；[ViCuR](papers/vicur.md)（E-004、E-008）
+- 当前认识：原版 OPSD 给教师完整数学题解，学生只看题目。本仓库 SPAR 的 GT 常是短段落、选项或数字，特权更弱。ViCuR 报告 answer-based OPSD 会出现 “Hint” 词面泄漏。
+- 相互冲突的证据：OPSD 在 AIME/HMMT 上报告 Avg@12 提升；ViCuR 在视觉任务上报告答案特权低于 cue，并伴随 hint pattern。两者任务与答案长度都不同。
+- 需要查阅：等视图 Answer-OPSD 训练 dump 中 Hint/模板句/GT 复述率，以及 VSI/SPAR 相对 geo SFT 与 T32/S16 视图特权臂的差值。
+- 可验证实验：student/teacher 全相册、仅 teacher 接 GT；对照 noprivilege 等视图无答案；报告泄漏率、in-loop VSI、离线 SPAR。
+- 结论：待实验。
+- 最后更新：2026-09-19
 
 ## 一般问题
 

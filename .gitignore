@@ -24,3 +24,7 @@ hf_cache/
 /models/
 /vsibench/
 sam_hq_vit_h.pth
+/sparbench_cache/
+/experiments/viewers/
+.pytest_cache/
+.cursor/*.log

@@ -1,0 +1,138 @@
+experiment_id: 20260918_blink_full_lastline
+title: "BLINK 14 任务 val lastline：geo SFT vs VLM-3R step 635"
+status: completed
+finished_at: "2026-09-18T16:15:02+08:00"
+
+created_at: "2026-09-18T14:47:00+08:00"
+started_at: "2026-09-18T14:50:48+08:00"
+driver_pid: 562684
+eval_pgid: 562684
+owner: cursor-window-spatialstack
+
+goal: >
+  用 lastline / HF / sr_opsd / greedy @1024 评 BLINK val 全集（14 任务，约 1901 题）。
+  两模型：SpatialStack geo SFT 与 VLM-3R T8/S4 step 635。
+  先 LIMIT=8 冒烟；group 因 VGGT 多图 fusion 中断则逐任务 continue。
+  不改 fusion 加法语义。14 项未齐则不报残缺宏平均。
+
+relations:
+  geo: 20260918_spatialstack_geo_lastline
+  vlm3r: 20260915_spatialstack_mvopsd_vlm3r_t8_s4
+  prior_spatial3_geo_lastline: 52.29
+  do_not_mix:
+    - "vLLM BLINK 14 boxed 62.67 / 63.66"
+    - "HF blink_spatial 3 任务 vs 本实验 14 任务宏平均"
+    - "original 句首字母协议"
+
+environment:
+  conda_env: sr_opsd
+  nodes: [node-C]
+  gpus_per_node: 8
+  gpu_type: H20
+  ssh: "nodec / opsd3 as root; HOME=/home/c30084464"
+  engine: huggingface_lmms_eval
+
+model:
+  geo: output/spatialstack_qwen35_train
+  vlm3r635: output/20260915_spatialstack_mvopsd_vlm3r_t8_s4_global_step_635_hf
+  geometry_encoder: models/VGGT-1B
+  impl: qwen3_5
+
+evaluation:
+  status: completed
+  finished_at: "2026-09-18T16:15:02+08:00"
+  entrypoint: scripts/opsd/eval_blink_full_lastline_geo_vlm3r.sh
+  command: |
+    setsid nohup env HOME=/home/c30084464 SKIP_SMOKE=1
+      bash scripts/opsd/eval_blink_full_lastline_geo_vlm3r.sh
+  benchmarks: [blink]
+  parameters:
+    BLINK_PROTOCOL: lastline
+    max_new_tokens: 1024
+    n_tasks: 14
+    split: val
+    mode: per_task
+  artifacts:
+    eval_root: logs/eval/20260918_blink_full_lastline
+    log: logs/eval/20260918_blink_full_lastline/driver.log
+    nohup: logs/eval/20260918_blink_full_lastline/nohup.log
+    combined: logs/eval/20260918_blink_full_lastline/combined_summary.json
+  results:
+    metrics:
+      geo_n_tasks: 10
+      geo_spatial_macro: 52.29
+      geo_mvr: 5.26
+      geo_mvr_answered: 100.0
+      vlm_n_tasks: 10
+      vlm_spatial_macro: 54.40
+      vlm_mvr: 6.77
+      vlm_mvr_answered: 100.0
+      macro_14: null
+      failed_both:
+        - blink_art_style
+        - blink_functional_correspondence
+        - blink_semantic_correspondence
+        - blink_visual_correspondence
+    summary: >
+      14 项未齐，不报 macro_14。两边都是 10/14。spatial-3：geo 52.29（与先前 lastline 一致），
+      VLM-635 54.40。MVR 作答 100%、回复 1 字符，geo 5.26 / 635 6.77，是答错不是解析失败。
+      失败 4 项均为 VGGT fusion token 不对齐。
+    failure_reason: ""
+
+read_rules:
+  - "lastline HF 不可与 vLLM boxed / original 句首并列"
+  - "14 项未齐不报 macro_14"
+  - "spatial-3 可与 geo lastline 52.29 对照"
+
+handoff:
+  current_phase: done
+  last_updated: "2026-09-18T16:16:00+08:00"
+  current_task: none
+  owner: cursor-window-spatialstack
+  active_job_id: ""
+  resources: "node-C 8×H20 idle"
+  blocker: ""
+  next_action: >
+    不报 14 项宏平均。MVR 已确认作答 100%、单字母、系统性答错。
+    未跑 fusion 对齐修复。
+
+issues:
+  - id: ISSUE-001
+    status: resolved
+    symptom: "首次 blink group 冒烟 FileNotFoundError，却被当成 smoke PASS"
+    evidence: "C 上 cache/datasets/BLINK-Benchmark__BLINK 只有 3 个 spatial 配置；driver 14:52 RetryError"
+    root_cause: "HF_OFFLINE 下缺 11 个 BLINK 配置；脚本只看 eval.sh rc=0"
+    solution: "ModelScope evalscope/BLINK 补齐 14 配置；smoke PASS 改为还要 results_ok 14 项"
+    at: "2026-09-18T14:56:00+08:00"
+  - id: ISSUE-002
+    status: open
+    symptom: "art_style / functional_correspondence / semantic_correspondence / visual_correspondence fusion 长度对不齐"
+    evidence: "feature_fusion.py:438 features_2d + geo_feats，如 4589 vs 6615、1248 vs 1536"
+    root_cause: "deepstack_language_add 假定 2D 与 VGGT token 数相同；BLINK 部分任务分辨率/多图不满足"
+    solution: "按计划未改 fusion 语义；四任务记 failed，不填 0 分"
+    at: "2026-09-18T16:15:02+08:00"
+  - id: ISSUE-003
+    status: mitigated
+    symptom: "visual_correspondence 部分 rank 炸 fusion 后 accelerate 挂起"
+    evidence: "geo 15:16 出错后挂到 15:49 才被 kill；VLM 16:07 出错后同样挂起"
+    root_cause: "8 卡中部分 rank 先 assert，其余仍在 generate"
+    solution: "手动 pkill 该 task，driver 记 rc=1 并 continue"
+    at: "2026-09-18T16:13:40+08:00"
+
+activity_log:
+  - at: "2026-09-18T14:50:00+08:00"
+    actor: cursor-window-spatialstack
+    action: "register BLINK 14 lastline geo vs VLM-635"
+    result: "preflight C idle; both HF ckpts present"
+  - at: "2026-09-18T14:50:48+08:00"
+    actor: node-C
+    action: "first launch PID 546852"
+    result: "false smoke pass; missing 11 BLINK configs; killed"
+  - at: "2026-09-18T14:59:33+08:00"
+    actor: node-C
+    action: "SKIP_SMOKE=1 per-task relaunch PID 562684"
+    result: "10/14 scored each model; 4 fusion fails"
+  - at: "2026-09-18T16:15:02+08:00"
+    actor: node-C
+    action: "driver DONE"
+    result: "geo spatial 52.29; VLM spatial 54.40; no macro_14; MVR answered 100%"
